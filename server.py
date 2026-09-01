@@ -1,576 +1,678 @@
-from flask import Flask, request, jsonify, render_template_string
-from flask_cors import CORS
-import sqlite3
-import datetime
+# -*- coding: utf-8 -*-
+"""
+============================================================
+ Система контроля доступа — Flask сервер (один файл)
+============================================================
+ Локальный запуск:
+     pip install flask
+     python server.py
+     -> http://localhost:5000/         (публичная страница)
+     -> http://localhost:5000/admin    (админ-панель)
+
+ Деплой на Render.com (без дополнительных файлов):
+     1. New -> Web Service -> подключить репозиторий с этим файлом.
+     2. Build Command:  pip install flask gunicorn
+     3. Start Command:  gunicorn server:app --workers 1 --bind 0.0.0.0:$PORT
+        (--workers 1 обязателен: состояние регистрации хранится
+         в памяти процесса, при нескольких воркерах оно "разъедется")
+     4. В прошивке ESP32 указать выданный Render URL в serverUrl.
+============================================================
+"""
+
 import os
+import sqlite3
+import threading
+from datetime import datetime
+
+from flask import Flask, request, jsonify, render_template_string
 
 app = Flask(__name__)
-CORS(app)
 
-DB_FILE = 'rfid_logs.db'
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "access_control.db")
+db_lock = threading.Lock()
 
-# ==================== ПУБЛИЧНЫЙ САЙТ ====================
-PUBLIC_HTML = """
-<!DOCTYPE html>
-<html>
-<head>
-<meta charset="UTF-8">
-<title>RFID Контроль доступа</title>
-<style>
-* { margin: 0; padding: 0; box-sizing: border-box; }
-body {
-  font-family: 'Segoe UI', Arial, sans-serif;
-  background: linear-gradient(135deg, #1a1a2e, #16213e, #0f3460);
-  color: white;
-  min-height: 100vh;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  padding: 20px;
-}
-.container { max-width: 600px; width: 100%; text-align: center; }
-.header h1 {
-  font-size: 2.5em;
-  background: linear-gradient(135deg, #2ecc71, #f5a623);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  margin-bottom: 10px;
-}
-.stats {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 20px;
-  margin: 30px 0;
-}
-.stat-card {
-  background: rgba(255,255,255,0.05);
-  backdrop-filter: blur(10px);
-  padding: 20px;
-  border-radius: 15px;
-  border: 1px solid rgba(255,255,255,0.1);
-}
-.stat-card .number {
-  font-size: 3em;
-  font-weight: bold;
-  background: linear-gradient(135deg, #2ecc71, #f5a623);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-}
-.stat-card .label { color: #aaa; margin-top: 5px; font-size: 0.9em; }
-.card {
-  background: rgba(255,255,255,0.05);
-  backdrop-filter: blur(10px);
-  border-radius: 15px;
-  padding: 25px;
-  border: 1px solid rgba(255,255,255,0.1);
-  margin-top: 20px;
-}
-.card h2 { color: #f5a623; margin-bottom: 15px; font-size: 1.2em; }
-.reg-form { margin-top: 15px; padding-top: 15px; border-top: 1px solid rgba(255,255,255,0.1); }
-.input-group { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; margin-top: 10px; }
-.input-group input {
-  padding: 10px;
-  border-radius: 8px;
-  border: 1px solid #555;
-  background: #222;
-  color: white;
-  min-width: 120px;
-  flex: 1;
-}
-.btn {
-  background: #e94560;
-  border: none;
-  color: white;
-  padding: 10px 25px;
-  border-radius: 8px;
-  cursor: pointer;
-  font-size: 1em;
-  transition: 0.3s;
-}
-.btn:hover { opacity: 0.8; }
-.btn-green { background: #2ecc71; }
-.reg-message { margin-top: 10px; font-size: 0.95em; color: #aaa; }
-.footer { margin-top: 30px; color: #555; font-size: 0.8em; }
-</style>
-</head>
-<body>
-<div class="container">
-  <div class="header"><h1>🏢 RFID Контроль доступа</h1><p style="color:#aaa;">Текущий статус системы</p></div>
-  <div class="stats">
-    <div class="stat-card"><div class="number" id="currentPeople">0</div><div class="label">👤 Людей внутри</div></div>
-    <div class="stat-card"><div class="number" id="lastEventTime">--:--</div><div class="label">🕒 Последнее событие</div></div>
-  </div>
-  <div class="card">
-    <h2>📝 Регистрация</h2>
-    <div id="regStatus" style="color:#aaa;">🔒 Регистрация закрыта</div>
-    <div class="reg-form" id="regForm" style="display:none;">
-      <p style="color: #aaa; font-size: 0.9em;">Приложите карту к RFID и введите данные</p>
-      <div class="input-group">
-        <input type="text" id="regName" placeholder="Имя">
-        <input type="text" id="regSurname" placeholder="Фамилия">
-        <button class="btn btn-green" id="regBtn">Зарегистрироваться</button>
-      </div>
-      <div id="regMessage" class="reg-message"></div>
-    </div>
-  </div>
-  <div class="footer"><span>Система работает</span></div>
-</div>
-<script>
-const API_URL = window.location.origin;
-let pendingUid = null;
-
-document.getElementById('regBtn').addEventListener('click', async () => {
-  const name = document.getElementById('regName').value.trim();
-  const surname = document.getElementById('regSurname').value.trim();
-  const msg = document.getElementById('regMessage');
-  if (!name || !surname) { msg.innerHTML = '<span style="color:#f1c40f;">Введите имя и фамилию</span>'; return; }
-  if (!pendingUid) { msg.innerHTML = '<span style="color:#e74c3c;">Сначала приложите карту к RFID</span>'; return; }
-  try {
-    const resp = await fetch(API_URL + '/confirm-registration', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ uid: pendingUid, name, surname })
-    });
-    const data = await resp.json();
-    if (data.status === 'ok') {
-      msg.innerHTML = '<span style="color:#2ecc71;">✅ Вы зарегистрированы!</span>';
-      document.getElementById('regName').value = '';
-      document.getElementById('regSurname').value = '';
-      pendingUid = null;
-      loadData();
-    } else {
-      msg.innerHTML = `<span style="color:#e74c3c;">❌ ${data.message || 'Ошибка'}</span>`;
-    }
-  } catch (e) { msg.innerHTML = '<span style="color:#e74c3c;">Ошибка соединения</span>'; }
-});
-
-async function loadData() {
-  try {
-    const resp = await fetch(API_URL + '/api/public-data');
-    const data = await resp.json();
-    document.getElementById('currentPeople').textContent = data.inside_count || 0;
-    document.getElementById('lastEventTime').textContent = data.last_time ? data.last_time.substring(11, 16) : '--:--';
-    
-    const status = document.getElementById('regStatus');
-    const form = document.getElementById('regForm');
-    const msg = document.getElementById('regMessage');
-    
-    if (data.registration_open) {
-      status.innerHTML = '✅ Регистрация <span style="color:#2ecc71;">ОТКРЫТА</span>';
-      form.style.display = 'block';
-    } else {
-      status.innerHTML = '🔒 Регистрация <span style="color:#e74c3c;">ЗАКРЫТА</span>';
-      form.style.display = 'none';
-      msg.innerHTML = '';
-    }
-    
-    pendingUid = data.pending_uid || null;
-    if (pendingUid && data.registration_open) {
-      msg.innerHTML = `<span style="color:#3498db;">Карта ${pendingUid} ожидает регистрации</span>`;
-    } else if (data.registration_open) {
-      msg.innerHTML = '<span style="color:#aaa;">Приложите карту к RFID</span>';
-    }
-  } catch (e) { console.error(e); }
-}
-setInterval(loadData, 2000);
-loadData();
-</script>
-</body>
-</html>
-"""
-
-# ==================== АДМИН-ПАНЕЛЬ ====================
-ADMIN_HTML = """
-<!DOCTYPE html>
-<html>
-<head>
-<meta charset="UTF-8">
-<title>RFID Админ-панель</title>
-<style>
-* { margin: 0; padding: 0; box-sizing: border-box; }
-body {
-  font-family: 'Segoe UI', Arial, sans-serif;
-  background: linear-gradient(135deg, #1a1a2e, #16213e, #0f3460);
-  color: white;
-  min-height: 100vh;
-  padding: 20px;
-}
-.container { max-width: 1200px; margin: 0 auto; }
-.header { text-align: center; padding: 30px 0; border-bottom: 2px solid rgba(255,255,255,0.1); margin-bottom: 30px; }
-.header h1 {
-  font-size: 2.5em;
-  background: linear-gradient(135deg, #e94560, #f5a623);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-}
-.stats {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: 20px;
-  margin-bottom: 30px;
-}
-.stat-card {
-  background: rgba(255,255,255,0.05);
-  backdrop-filter: blur(10px);
-  padding: 20px;
-  border-radius: 15px;
-  text-align: center;
-  border: 1px solid rgba(255,255,255,0.1);
-}
-.stat-card .number {
-  font-size: 2.5em;
-  font-weight: bold;
-  background: linear-gradient(135deg, #e94560, #f5a623);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-}
-.stat-card .label { color: #aaa; margin-top: 5px; font-size: 0.9em; }
-.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 30px; }
-@media (max-width: 768px) { .grid-2 { grid-template-columns: 1fr; } }
-.card {
-  background: rgba(255,255,255,0.05);
-  backdrop-filter: blur(10px);
-  border-radius: 15px;
-  padding: 25px;
-  border: 1px solid rgba(255,255,255,0.1);
-}
-.card h2 { margin-bottom: 20px; font-size: 1.3em; color: #e94560; }
-table { width: 100%; border-collapse: collapse; margin-top: 10px; }
-th { text-align: left; padding: 12px; border-bottom: 2px solid rgba(255,255,255,0.1); color: #aaa; font-weight: 400; font-size: 0.9em; }
-td { padding: 12px; border-bottom: 1px solid rgba(255,255,255,0.05); }
-.status-enter { color: #2ecc71; }
-.status-exit { color: #f1c40f; }
-.status-blocked { color: #e74c3c; }
-.status-register { color: #3498db; }
-.btn {
-  background: #e94560;
-  border: none;
-  color: white;
-  padding: 10px 25px;
-  border-radius: 8px;
-  cursor: pointer;
-  font-size: 1em;
-  transition: 0.3s;
-}
-.btn:hover { opacity: 0.8; }
-.btn-green { background: #2ecc71; }
-.btn-danger { background: #e74c3c; padding: 5px 12px; font-size: 0.8em; }
-.reg-block {
-  margin-top: 20px;
-  padding: 20px;
-  background: rgba(255,255,255,0.03);
-  border-radius: 12px;
-  border: 1px solid rgba(255,255,255,0.1);
-}
-.reg-block .indicator { display: flex; align-items: center; gap: 15px; margin-bottom: 15px; }
-.led { width: 20px; height: 20px; border-radius: 50%; display: inline-block; transition: 0.3s; }
-.led-green { background: #2ecc71; box-shadow: 0 0 15px #2ecc71; }
-.led-red { background: #e74c3c; box-shadow: 0 0 15px #e74c3c; }
-.input-group { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
-.input-group input { flex: 1; padding: 10px; border-radius: 8px; border: 1px solid #555; background: #222; color: white; min-width: 150px; }
-.reg-message { margin-top: 10px; font-size: 0.95em; }
-</style>
-</head>
-<body>
-<div class="container">
-  <div class="header"><h1>🔐 RFID Админ-панель</h1></div>
-  <div class="stats">
-    <div class="stat-card"><div class="number" id="totalEvents">0</div><div class="label">📊 Всего событий</div></div>
-    <div class="stat-card" style="border:1px solid #2ecc71;"><div class="number" id="currentPeople">0</div><div class="label">👤 Сейчас внутри</div></div>
-    <div class="stat-card"><div class="number" id="inMatch">0</div><div class="label">✅ Входов</div></div>
-    <div class="stat-card"><div class="number" id="outCount">0</div><div class="label">🚪 Выходов</div></div>
-    <div class="stat-card"><div class="number" id="lastEventTime">--:--</div><div class="label">🕒 Последнее событие</div></div>
-  </div>
-  <div class="grid-2">
-    <div>
-      <div class="card">
-        <h2>📋 Лента событий</h2>
-        <div style="max-height:400px;overflow-y:auto;">
-          <table><thead><tr><th>Действие</th><th>Карта</th><th>Время</th></tr></thead><tbody id="eventsList"></tbody></table>
-        </div>
-      </div>
-    </div>
-    <div>
-      <div class="card">
-        <h2>👤 Управление</h2>
-        <div class="reg-block">
-          <div class="indicator">
-            <span>Статус регистрации:</span>
-            <span class="led" id="regLed"></span>
-            <span id="regStatusText">Закрыта</span>
-          </div>
-          <button class="btn" id="toggleRegBtn">Открыть регистрацию</button>
-          <div id="registrationForm" style="display:none;margin-top:20px;border-top:1px solid #444;padding-top:20px;">
-            <h3 style="color:#f5a623;">Зарегистрировать карту</h3>
-            <p style="color:#aaa;font-size:0.9em;">Приложите карту к RFID, затем введите имя и фамилию</p>
-            <div class="input-group">
-              <input type="text" id="regName" placeholder="Имя">
-              <input type="text" id="regSurname" placeholder="Фамилия">
-              <button class="btn btn-green" id="confirmRegBtn">Подтвердить</button>
-            </div>
-            <div id="regMessage" class="reg-message"></div>
-          </div>
-        </div>
-      </div>
-      <div class="card" style="margin-top:20px;">
-        <h2>📋 Пользователи</h2>
-        <div style="max-height:300px;overflow-y:auto;">
-          <table><thead><tr><th>Имя</th><th>UID</th><th>Статус</th></tr></thead><tbody id="usersList"></tbody></table>
-        </div>
-      </div>
-    </div>
-  </div>
-</div>
-<script>
-const API_URL = window.location.origin;
-let regOpen = false, pendingUid = null;
-
-function updateRegUI() {
-  const led = document.getElementById('regLed'), text = document.getElementById('regStatusText');
-  const btn = document.getElementById('toggleRegBtn'), form = document.getElementById('registrationForm');
-  if (regOpen) {
-    led.className = 'led led-green'; text.textContent = 'Открыта';
-    btn.textContent = 'Закрыть регистрацию'; form.style.display = 'block';
-  } else {
-    led.className = 'led led-red'; text.textContent = 'Закрыта';
-    btn.textContent = 'Открыть регистрацию'; form.style.display = 'none';
-    document.getElementById('regMessage').innerHTML = '';
-  }
-}
-
-document.getElementById('toggleRegBtn').addEventListener('click', async () => {
-  const resp = await fetch(API_URL + '/toggle-registration', { method: 'POST' });
-  const data = await resp.json();
-  regOpen = data.open; updateRegUI();
-});
-
-document.getElementById('confirmRegBtn').addEventListener('click', async () => {
-  const name = document.getElementById('regName').value.trim();
-  const surname = document.getElementById('regSurname').value.trim();
-  const msg = document.getElementById('regMessage');
-  if (!name || !surname) { msg.innerHTML = '<span style="color:#f1c40f;">Введите имя и фамилию</span>'; return; }
-  if (!pendingUid) { msg.innerHTML = '<span style="color:#e74c3c;">Сначала приложите карту к RFID</span>'; return; }
-  const resp = await fetch(API_URL + '/confirm-registration', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ uid: pendingUid, name, surname })
-  });
-  const data = await resp.json();
-  if (data.status === 'ok') {
-    msg.innerHTML = '<span style="color:#2ecc71;">✅ Пользователь зарегистрирован!</span>';
-    document.getElementById('regName').value = ''; document.getElementById('regSurname').value = '';
-    pendingUid = null; loadData();
-  } else {
-    msg.innerHTML = `<span style="color:#e74c3c;">❌ ${data.message || 'Ошибка'}</span>`;
-  }
-});
-
-async function loadData() {
-  const resp = await fetch(API_URL + '/api/get-users');
-  const data = await resp.json();
-  const list = document.getElementById('eventsList');
-  list.innerHTML = '';
-  let total=0, count1=0, count2=0, inside=0, last='--:--';
-  if (data.events && data.events.length > 0) {
-    total = data.events.length; last = data.events[0][2].substring(11,16);
-    data.events.forEach(ev => {
-      let a=ev[0], u=ev[1], t=ev[2], cls='', txt='';
-      if (a==='enter') { count1++; inside++; cls='status-enter'; txt='✅ Вход'; }
-      else if (a==='exit') { count2++; inside--; cls='status-exit'; txt='🚪 Выход'; }
-      else if (a==='register'||a==='register_request') { cls='status-register'; txt='📝 Регистрация'; }
-      else if (a==='blocked_enter') { cls='status-blocked'; txt='⛔ Блокировка входа'; }
-      else if (a==='blocked_exit') { cls='status-blocked'; txt='⛔ Блокировка выхода'; }
-      else { cls='status-blocked'; txt='⛔ '+a; }
-      list.innerHTML += `<tr><td class="${cls}">${txt}</td><td>${u}</td><td>${t}</td></tr>`;
-    });
-  }
-  document.getElementById('totalEvents').textContent = total;
-  document.getElementById('currentPeople').textContent = inside < 0 ? 0 : inside;
-  document.getElementById('inMatch').textContent = count1;
-  document.getElementById('outCount').textContent = count2;
-  document.getElementById('lastEventTime').textContent = last;
-
-  const usersList = document.getElementById('usersList');
-  usersList.innerHTML = '';
-  if (data.users && data.users.length > 0) {
-    data.users.forEach(u => {
-      const status = u.is_inside ? 'Внутри' : 'Снаружи';
-      const color = u.is_inside ? '#2ecc71' : '#f1c40f';
-      usersList.innerHTML += `<tr><td>${u.name} ${u.surname}</td><td>${u.uid}</td><td style="color:${color}">${status}</td></tr>`;
-    });
-  } else {
-    usersList.innerHTML = '<tr><td colspan="3" style="color:#aaa;">Нет пользователей</td></tr>';
-  }
-  const sr = await fetch(API_URL + '/api/registration-status');
-  const sd = await sr.json();
-  regOpen = sd.open; pendingUid = sd.pending_uid || null;
-  updateRegUI();
-  if (pendingUid) document.getElementById('regMessage').innerHTML = `<span style="color:#3498db;">Карта ${pendingUid} ожидает регистрации</span>`;
-  else if (regOpen) document.getElementById('regMessage').innerHTML = '<span style="color:#aaa;">Приложите карту к RFID</span>';
-}
-setInterval(loadData, 2000); loadData();
-</script>
-</body>
-</html>
-"""
-
-# ==================== БАЗА ДАННЫХ ====================
-def init_db():
-    if os.path.exists(DB_FILE):
-        os.remove(DB_FILE)
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('''CREATE TABLE users (
-        uid TEXT PRIMARY KEY,
-        name TEXT,
-        surname TEXT,
-        is_inside INTEGER DEFAULT 0
-    )''')
-    c.execute('''CREATE TABLE events (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        action TEXT NOT NULL,
-        uid TEXT NOT NULL,
-        timestamp TEXT NOT NULL
-    )''')
-    conn.commit()
-    conn.close()
-
-init_db()
-
+# Состояние регистрации хранится в памяти процесса
 registration_open = False
 pending_uid = None
 
-# ==================== API ====================
-@app.route('/')
-def home():
+
+# ============================================================
+#  РАБОТА С БАЗОЙ ДАННЫХ
+# ============================================================
+def get_db():
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def init_db():
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            uid TEXT PRIMARY KEY,
+            name TEXT DEFAULT 'User',
+            surname TEXT DEFAULT '',
+            is_inside INTEGER DEFAULT 0
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            action TEXT,
+            uid TEXT,
+            timestamp TEXT
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+
+def now_str():
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def log_event(action, uid):
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO events (action, uid, timestamp) VALUES (?, ?, ?)",
+        (action, uid, now_str()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_or_create_user(uid):
+    """Возвращает (row, created). Если карты не было — создаёт с именем 'User'."""
+    conn = get_db()
+    row = conn.execute("SELECT * FROM users WHERE uid = ?", (uid,)).fetchone()
+    created = False
+    if row is None:
+        conn.execute(
+            "INSERT INTO users (uid, name, surname, is_inside) VALUES (?, 'User', '', 0)",
+            (uid,),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM users WHERE uid = ?", (uid,)).fetchone()
+        created = True
+    conn.close()
+    return row, created
+
+
+def set_inside(uid, value):
+    conn = get_db()
+    conn.execute("UPDATE users SET is_inside = ? WHERE uid = ?", (value, uid))
+    conn.commit()
+    conn.close()
+
+
+# ============================================================
+#  API: /rfid  — обработка запросов от ESP32
+# ============================================================
+@app.route("/rfid")
+def rfid():
+    global pending_uid
+
+    reader = request.args.get("reader")
+    uid = request.args.get("uid")
+
+    if not reader or not uid:
+        return jsonify({"status": "error", "message": "Параметры reader и uid обязательны"}), 400
+
+    uid = uid.upper()
+
+    if reader not in ("1", "2", "3"):
+        return jsonify({"status": "error", "message": "reader должен быть 1, 2 или 3"}), 400
+
+    with db_lock:
+        user, created = get_or_create_user(uid)
+        if created:
+            log_event("register", uid)
+
+        # ---------------- RFID1: ВХОД ----------------
+        if reader == "1":
+            if user["is_inside"] == 1:
+                status, message = "denied", f"Карта {uid} уже отмечена как 'внутри'"
+            else:
+                set_inside(uid, 1)
+                log_event("entry", uid)
+                fio = (user["name"] + " " + user["surname"]).strip()
+                status, message = "ok", f"Вход разрешён: {fio}"
+
+        # ---------------- RFID2: ВЫХОД ----------------
+        elif reader == "2":
+            if user["is_inside"] == 0:
+                status, message = "denied", f"Карта {uid} не отмечена как 'внутри'"
+            else:
+                set_inside(uid, 0)
+                log_event("exit", uid)
+                fio = (user["name"] + " " + user["surname"]).strip()
+                status, message = "ok", f"Выход разрешён: {fio}"
+
+        # ---------------- RFID3: РЕГИСТРАЦИЯ ----------------
+        else:  # reader == "3"
+            if registration_open:
+                pending_uid = uid
+                log_event("registration_scan", uid)
+                status, message = "ok", f"Карта {uid} ожидает ввода имени на сайте"
+            else:
+                status, message = "denied", "Регистрация закрыта администратором"
+
+    return jsonify({"status": status, "uid": uid, "message": message})
+
+
+# ============================================================
+#  API: список пользователей и событий (для админки)
+# ============================================================
+@app.route("/api/get-users")
+def api_get_users():
+    conn = get_db()
+    users = [dict(r) for r in conn.execute("SELECT * FROM users ORDER BY uid").fetchall()]
+    events = [dict(r) for r in conn.execute(
+        "SELECT * FROM events ORDER BY id DESC LIMIT 200"
+    ).fetchall()]
+
+    total_events = conn.execute("SELECT COUNT(*) c FROM events").fetchone()["c"]
+    inside_count = conn.execute("SELECT COUNT(*) c FROM users WHERE is_inside = 1").fetchone()["c"]
+    entries = conn.execute("SELECT COUNT(*) c FROM events WHERE action = 'entry'").fetchone()["c"]
+    exits = conn.execute("SELECT COUNT(*) c FROM events WHERE action = 'exit'").fetchone()["c"]
+    conn.close()
+
+    stats = {
+        "total_events": total_events,
+        "inside_count": inside_count,
+        "entries": entries,
+        "exits": exits,
+        "total_users": len(users),
+    }
+
+    return jsonify({"users": users, "events": events, "stats": stats})
+
+
+# ============================================================
+#  API: публичные данные для главной страницы
+# ============================================================
+@app.route("/api/public-data")
+def api_public_data():
+    conn = get_db()
+    inside_count = conn.execute("SELECT COUNT(*) c FROM users WHERE is_inside = 1").fetchone()["c"]
+    last_event = conn.execute("SELECT * FROM events ORDER BY id DESC LIMIT 1").fetchone()
+    conn.close()
+
+    return jsonify({
+        "inside_count": inside_count,
+        "last_event_time": last_event["timestamp"] if last_event else None,
+        "last_event_action": last_event["action"] if last_event else None,
+        "last_event_uid": last_event["uid"] if last_event else None,
+        "registration_open": registration_open,
+    })
+
+
+# ============================================================
+#  API: статус регистрации (открыта/закрыта + ожидающий UID)
+# ============================================================
+@app.route("/api/registration-status")
+def api_registration_status():
+    return jsonify({
+        "registration_open": registration_open,
+        "pending_uid": pending_uid,
+    })
+
+
+# ============================================================
+#  API: открыть/закрыть регистрацию (кнопка в админке)
+# ============================================================
+@app.route("/toggle-registration", methods=["POST"])
+def toggle_registration():
+    global registration_open, pending_uid
+    with db_lock:
+        registration_open = not registration_open
+        if not registration_open:
+            pending_uid = None
+    return jsonify({"registration_open": registration_open, "pending_uid": pending_uid})
+
+
+# ============================================================
+#  API: подтверждение регистрации (форма Имя/Фамилия на сайте)
+# ============================================================
+@app.route("/confirm-registration", methods=["POST"])
+def confirm_registration():
+    global pending_uid, registration_open
+
+    data = request.get_json(silent=True) or {}
+    name = (data.get("name") or "").strip()
+    surname = (data.get("surname") or "").strip()
+
+    with db_lock:
+        if not pending_uid:
+            return jsonify({"status": "error", "message": "Нет карты, ожидающей регистрации. Приложите карту к RFID3."}), 400
+        if not name:
+            return jsonify({"status": "error", "message": "Поле 'Имя' обязательно для заполнения"}), 400
+
+        conn = get_db()
+        conn.execute(
+            "UPDATE users SET name = ?, surname = ? WHERE uid = ?",
+            (name, surname, pending_uid),
+        )
+        conn.commit()
+        conn.close()
+
+        log_event("registration_confirm", pending_uid)
+
+        confirmed_uid = pending_uid
+        pending_uid = None
+        registration_open = False
+
+    return jsonify({"status": "ok", "uid": confirmed_uid, "message": "Регистрация завершена"})
+
+
+# ============================================================
+#  HTML: ПУБЛИЧНАЯ СТРАНИЦА
+# ============================================================
+PUBLIC_HTML = """
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Система контроля доступа</title>
+<style>
+  :root{
+    --bg:#0e1016; --card:#171a23; --card2:#1e2230; --border:#2a2f3f;
+    --text:#e7e9ee; --muted:#8a90a2; --accent:#5b8cff; --green:#3ddc97;
+    --red:#ff5c7a; --yellow:#ffc857;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0; min-height:100vh; background:
+      radial-gradient(circle at 20% 0%, #1a1f2e 0%, var(--bg) 45%);
+    color:var(--text); font-family:'Segoe UI',Roboto,Arial,sans-serif;
+    display:flex; justify-content:center; padding:32px 16px;
+  }
+  .wrap{width:100%; max-width:560px;}
+  h1{font-size:22px; font-weight:600; text-align:center; margin:0 0 28px;
+     letter-spacing:.3px;}
+  h1 span{color:var(--accent);}
+  .card{
+    background:linear-gradient(180deg, var(--card2), var(--card));
+    border:1px solid var(--border); border-radius:16px;
+    padding:22px; margin-bottom:16px; box-shadow:0 10px 30px rgba(0,0,0,.35);
+  }
+  .grid2{display:grid; grid-template-columns:1fr 1fr; gap:16px;}
+  .stat-label{color:var(--muted); font-size:13px; text-transform:uppercase;
+     letter-spacing:.06em; margin-bottom:6px;}
+  .stat-value{font-size:32px; font-weight:700;}
+  .stat-value.inside{color:var(--green);}
+  .stat-sub{font-size:13px; color:var(--muted); margin-top:4px;}
+  .badge{
+    display:inline-flex; align-items:center; gap:8px; padding:6px 14px;
+    border-radius:999px; font-size:13px; font-weight:600;
+  }
+  .badge.open{background:rgba(61,220,151,.12); color:var(--green); border:1px solid rgba(61,220,151,.35);}
+  .badge.closed{background:rgba(255,92,122,.12); color:var(--red); border:1px solid rgba(255,92,122,.35);}
+  .dot{width:8px; height:8px; border-radius:50%; background:currentColor;}
+  form{display:flex; flex-direction:column; gap:12px; margin-top:14px;}
+  input{
+    background:#11131a; border:1px solid var(--border); border-radius:10px;
+    padding:12px 14px; color:var(--text); font-size:14px; outline:none;
+    transition:border-color .15s;
+  }
+  input:focus{border-color:var(--accent);}
+  button{
+    background:linear-gradient(180deg, #6d95ff, var(--accent));
+    color:#fff; border:none; border-radius:10px; padding:12px 14px;
+    font-size:14px; font-weight:600; cursor:pointer; transition:opacity .15s;
+  }
+  button:disabled{opacity:.4; cursor:not-allowed;}
+  button:hover:not(:disabled){opacity:.9;}
+  .hint{font-size:13px; color:var(--muted); line-height:1.5;}
+  .pending{
+    background:rgba(255,200,87,.1); border:1px solid rgba(255,200,87,.3);
+    color:var(--yellow); border-radius:10px; padding:10px 12px; font-size:13px;
+    margin-top:10px;
+  }
+  .msg{margin-top:10px; font-size:13px; border-radius:10px; padding:10px 12px; display:none;}
+  .msg.ok{background:rgba(61,220,151,.12); color:var(--green); display:block;}
+  .msg.err{background:rgba(255,92,122,.12); color:var(--red); display:block;}
+  .footer-note{text-align:center; color:var(--muted); font-size:12px; margin-top:20px;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Система контроля <span>доступа</span></h1>
+
+  <div class="card grid2">
+    <div>
+      <div class="stat-label">Внутри сейчас</div>
+      <div class="stat-value inside" id="insideCount">—</div>
+    </div>
+    <div>
+      <div class="stat-label">Последнее событие</div>
+      <div class="stat-value" id="lastEventTime" style="font-size:18px;">—</div>
+      <div class="stat-sub" id="lastEventAction">—</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="stat-label">Статус регистрации</div>
+    <div id="regBadge" class="badge closed" style="margin-top:8px;">
+      <span class="dot"></span><span id="regBadgeText">Закрыта</span>
+    </div>
+
+    <div id="pendingBox" class="pending" style="display:none;"></div>
+
+    <form id="regForm">
+      <input type="text" id="fname" placeholder="Имя" autocomplete="off">
+      <input type="text" id="fsurname" placeholder="Фамилия" autocomplete="off">
+      <button type="submit" id="submitBtn">Зарегистрироваться</button>
+    </form>
+    <div class="hint" style="margin-top:10px;">
+      Чтобы зарегистрировать новую карту: администратор открывает регистрацию,
+      вы прикладываете карту к считывателю №3, затем заполняете форму выше.
+    </div>
+    <div class="msg" id="formMsg"></div>
+  </div>
+
+  <div class="footer-note">Обновление данных каждые 2 секунды</div>
+</div>
+
+<script>
+async function refreshPublic() {
+  try {
+    const [pubRes, regRes] = await Promise.all([
+      fetch('/api/public-data'), fetch('/api/registration-status')
+    ]);
+    const pub = await pubRes.json();
+    const reg = await regRes.json();
+
+    document.getElementById('insideCount').textContent = pub.inside_count;
+    document.getElementById('lastEventTime').textContent = pub.last_event_time || '—';
+
+    const actionsRu = {
+      entry: 'Вход', exit: 'Выход', register: 'Автоматическая регистрация',
+      registration_scan: 'Карта приложена к регистрации',
+      registration_confirm: 'Регистрация подтверждена'
+    };
+    document.getElementById('lastEventAction').textContent = pub.last_event_action
+      ? (actionsRu[pub.last_event_action] || pub.last_event_action) + (pub.last_event_uid ? (' · ' + pub.last_event_uid) : '')
+      : '—';
+
+    const badge = document.getElementById('regBadge');
+    const badgeText = document.getElementById('regBadgeText');
+    if (reg.registration_open) {
+      badge.className = 'badge open';
+      badgeText.textContent = 'Открыта';
+    } else {
+      badge.className = 'badge closed';
+      badgeText.textContent = 'Закрыта';
+    }
+
+    const pendingBox = document.getElementById('pendingBox');
+    const submitBtn = document.getElementById('submitBtn');
+    if (reg.registration_open && reg.pending_uid) {
+      pendingBox.style.display = 'block';
+      pendingBox.textContent = 'Карта обнаружена (UID: ' + reg.pending_uid + '). Заполните форму и нажмите кнопку.';
+      submitBtn.disabled = false;
+    } else if (reg.registration_open && !reg.pending_uid) {
+      pendingBox.style.display = 'block';
+      pendingBox.textContent = 'Регистрация открыта. Приложите карту к считывателю №3.';
+      submitBtn.disabled = true;
+    } else {
+      pendingBox.style.display = 'none';
+      submitBtn.disabled = true;
+    }
+  } catch (e) { /* тихо игнорируем сетевые сбои при поллинге */ }
+}
+
+document.getElementById('regForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const name = document.getElementById('fname').value.trim();
+  const surname = document.getElementById('fsurname').value.trim();
+  const msgBox = document.getElementById('formMsg');
+
+  try {
+    const res = await fetch('/confirm-registration', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, surname })
+    });
+    const data = await res.json();
+    if (data.status === 'ok') {
+      msgBox.className = 'msg ok';
+      msgBox.textContent = 'Готово! Карта ' + data.uid + ' зарегистрирована.';
+      document.getElementById('fname').value = '';
+      document.getElementById('fsurname').value = '';
+    } else {
+      msgBox.className = 'msg err';
+      msgBox.textContent = data.message || 'Ошибка регистрации';
+    }
+  } catch (err) {
+    msgBox.className = 'msg err';
+    msgBox.textContent = 'Ошибка сети';
+  }
+  refreshPublic();
+});
+
+refreshPublic();
+setInterval(refreshPublic, 2000);
+</script>
+</body>
+</html>
+"""
+
+
+# ============================================================
+#  HTML: АДМИН-ПАНЕЛЬ
+# ============================================================
+ADMIN_HTML = """
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Админ-панель — Контроль доступа</title>
+<style>
+  :root{
+    --bg:#0e1016; --card:#171a23; --card2:#1e2230; --border:#2a2f3f;
+    --text:#e7e9ee; --muted:#8a90a2; --accent:#5b8cff; --green:#3ddc97;
+    --red:#ff5c7a; --yellow:#ffc857;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0; min-height:100vh; background:
+      radial-gradient(circle at 80% 0%, #1a1f2e 0%, var(--bg) 45%);
+    color:var(--text); font-family:'Segoe UI',Roboto,Arial,sans-serif;
+    padding:28px 20px 60px;
+  }
+  .wrap{max-width:1100px; margin:0 auto;}
+  .top{display:flex; justify-content:space-between; align-items:center;
+       flex-wrap:wrap; gap:14px; margin-bottom:24px;}
+  h1{font-size:22px; font-weight:600; margin:0;}
+  h1 span{color:var(--accent);}
+  a.pubLink{color:var(--muted); font-size:13px; text-decoration:none; border-bottom:1px dashed var(--border);}
+  .btn{
+    background:linear-gradient(180deg, #6d95ff, var(--accent));
+    color:#fff; border:none; border-radius:10px; padding:11px 18px;
+    font-size:14px; font-weight:600; cursor:pointer;
+  }
+  .btn.danger{background:linear-gradient(180deg, #ff7a92, var(--red));}
+  .stats{display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:14px; margin-bottom:22px;}
+  .stat-card{
+    background:linear-gradient(180deg, var(--card2), var(--card));
+    border:1px solid var(--border); border-radius:14px; padding:16px;
+  }
+  .stat-label{color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.05em;}
+  .stat-value{font-size:26px; font-weight:700; margin-top:6px;}
+  .stat-value.green{color:var(--green);}
+  .stat-value.blue{color:var(--accent);}
+  .stat-value.red{color:var(--red);}
+  .columns{display:grid; grid-template-columns:1.1fr 1fr; gap:18px;}
+  @media (max-width: 860px){ .columns{grid-template-columns:1fr;} }
+  .panel{
+    background:linear-gradient(180deg, var(--card2), var(--card));
+    border:1px solid var(--border); border-radius:16px; padding:18px;
+  }
+  .panel h2{font-size:15px; margin:0 0 14px; color:var(--text); display:flex; align-items:center; justify-content:space-between;}
+  .badge{padding:4px 10px; border-radius:999px; font-size:12px; font-weight:600;}
+  .badge.open{background:rgba(61,220,151,.12); color:var(--green); border:1px solid rgba(61,220,151,.35);}
+  .badge.closed{background:rgba(255,92,122,.12); color:var(--red); border:1px solid rgba(255,92,122,.35);}
+  table{width:100%; border-collapse:collapse; font-size:13px;}
+  th{text-align:left; color:var(--muted); font-weight:500; padding:8px 6px; border-bottom:1px solid var(--border);}
+  td{padding:9px 6px; border-bottom:1px solid rgba(255,255,255,.04);}
+  tr:last-child td{border-bottom:none;}
+  .uid{font-family:'Consolas',monospace; color:var(--accent); font-size:12px;}
+  .tag{padding:3px 9px; border-radius:999px; font-size:11px; font-weight:600;}
+  .tag.entry{background:rgba(61,220,151,.12); color:var(--green);}
+  .tag.exit{background:rgba(255,92,122,.12); color:var(--red);}
+  .tag.register, .tag.registration_scan{background:rgba(255,200,87,.12); color:var(--yellow);}
+  .tag.registration_confirm{background:rgba(91,140,255,.14); color:var(--accent);}
+  .scroll{max-height:420px; overflow-y:auto;}
+  .dot{display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px;}
+  .dot.in{background:var(--green);}
+  .dot.out{background:var(--muted);}
+  .empty{color:var(--muted); font-size:13px; padding:14px 0; text-align:center;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <h1>Админ-панель <span>контроля доступа</span></h1>
+    <div style="display:flex; align-items:center; gap:16px;">
+      <a class="pubLink" href="/" target="_blank">Публичная страница →</a>
+      <button class="btn" id="toggleBtn">Загрузка...</button>
+    </div>
+  </div>
+
+  <div class="stats">
+    <div class="stat-card">
+      <div class="stat-label">Всего событий</div>
+      <div class="stat-value" id="sTotalEvents">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Людей внутри</div>
+      <div class="stat-value green" id="sInside">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Входов</div>
+      <div class="stat-value blue" id="sEntries">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Выходов</div>
+      <div class="stat-value red" id="sExits">—</div>
+    </div>
+  </div>
+
+  <div class="columns">
+    <div class="panel">
+      <h2>Лента событий <span class="badge open" id="regBadgeAdmin">—</span></h2>
+      <div class="scroll">
+        <table>
+          <thead><tr><th>Время</th><th>Действие</th><th>UID</th></tr></thead>
+          <tbody id="eventsBody"></tbody>
+        </table>
+        <div class="empty" id="eventsEmpty" style="display:none;">Событий пока нет</div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Пользователи</h2>
+      <div class="scroll">
+        <table>
+          <thead><tr><th>UID</th><th>Имя</th><th>Статус</th></tr></thead>
+          <tbody id="usersBody"></tbody>
+        </table>
+        <div class="empty" id="usersEmpty" style="display:none;">Пользователей пока нет</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const actionsRu = {
+  entry: 'Вход', exit: 'Выход', register: 'Авторегистрация',
+  registration_scan: 'Скан для регистрации',
+  registration_confirm: 'Регистрация подтверждена'
+};
+
+async function refreshAdmin() {
+  try {
+    const [dataRes, regRes] = await Promise.all([
+      fetch('/api/get-users'), fetch('/api/registration-status')
+    ]);
+    const data = await dataRes.json();
+    const reg = await regRes.json();
+
+    document.getElementById('sTotalEvents').textContent = data.stats.total_events;
+    document.getElementById('sInside').textContent = data.stats.inside_count;
+    document.getElementById('sEntries').textContent = data.stats.entries;
+    document.getElementById('sExits').textContent = data.stats.exits;
+
+    const badge = document.getElementById('regBadgeAdmin');
+    badge.className = 'badge ' + (reg.registration_open ? 'open' : 'closed');
+    badge.textContent = reg.registration_open
+      ? ('Регистрация открыта' + (reg.pending_uid ? (' · ждём: ' + reg.pending_uid) : ''))
+      : 'Регистрация закрыта';
+
+    const toggleBtn = document.getElementById('toggleBtn');
+    toggleBtn.textContent = reg.registration_open ? 'Закрыть регистрацию' : 'Открыть регистрацию';
+    toggleBtn.className = 'btn' + (reg.registration_open ? ' danger' : '');
+
+    const eventsBody = document.getElementById('eventsBody');
+    eventsBody.innerHTML = '';
+    document.getElementById('eventsEmpty').style.display = data.events.length ? 'none' : 'block';
+    data.events.forEach(ev => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${ev.timestamp}</td>
+        <td><span class="tag ${ev.action}">${actionsRu[ev.action] || ev.action}</span></td>
+        <td class="uid">${ev.uid}</td>`;
+      eventsBody.appendChild(tr);
+    });
+
+    const usersBody = document.getElementById('usersBody');
+    usersBody.innerHTML = '';
+    document.getElementById('usersEmpty').style.display = data.users.length ? 'none' : 'block';
+    data.users.forEach(u => {
+      const tr = document.createElement('tr');
+      const fio = (u.name + ' ' + u.surname).trim() || '—';
+      tr.innerHTML = `<td class="uid">${u.uid}</td>
+        <td>${fio}</td>
+        <td><span class="dot ${u.is_inside ? 'in' : 'out'}"></span>${u.is_inside ? 'Внутри' : 'Снаружи'}</td>`;
+      usersBody.appendChild(tr);
+    });
+  } catch (e) { /* тихо игнорируем сетевые сбои при поллинге */ }
+}
+
+document.getElementById('toggleBtn').addEventListener('click', async () => {
+  await fetch('/toggle-registration', { method: 'POST' });
+  refreshAdmin();
+});
+
+refreshAdmin();
+setInterval(refreshAdmin, 2000);
+</script>
+</body>
+</html>
+"""
+
+
+# ============================================================
+#  РОУТЫ СТРАНИЦ
+# ============================================================
+@app.route("/")
+def index():
     return render_template_string(PUBLIC_HTML)
 
-@app.route('/admin')
+
+@app.route("/admin")
 def admin():
     return render_template_string(ADMIN_HTML)
 
-@app.route('/toggle-registration', methods=['POST'])
-def toggle_registration():
-    global registration_open, pending_uid
-    registration_open = not registration_open
-    if not registration_open:
-        pending_uid = None
-    return jsonify({"open": registration_open})
 
-@app.route('/api/registration-status', methods=['GET'])
-def registration_status():
-    return jsonify({"open": registration_open, "pending_uid": pending_uid})
+# ============================================================
+#  ЗАПУСК
+# ============================================================
+init_db()
 
-@app.route('/confirm-registration', methods=['POST'])
-def confirm_registration():
-    global pending_uid
-    data = request.get_json()
-    uid = data.get('uid')
-    name = data.get('name')
-    surname = data.get('surname')
-    
-    if not uid or not name or not surname:
-        return jsonify({"status": "error", "message": "Не все поля заполнены"}), 400
-    if pending_uid != uid:
-        return jsonify({"status": "error", "message": "UID не совпадает"}), 400
-        
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT uid FROM users WHERE uid = ?", (uid,))
-    if c.fetchone():
-        pending_uid = None
-        conn.close()
-        return jsonify({"status": "error", "message": "Карта уже зарегистрирована"}), 400
-        
-    c.execute("UPDATE users SET name = ?, surname = ? WHERE uid = ?", (name, surname, uid))
-    if c.rowcount == 0:
-        c.execute("INSERT INTO users (uid, name, surname, is_inside) VALUES (?, ?, ?, 0)", (uid, name, surname))
-    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    c.execute("INSERT INTO events (action, uid, timestamp) VALUES ('register', ?, ?)", (uid, now))
-    conn.commit()
-    conn.close()
-    pending_uid = None
-    return jsonify({"status": "ok", "message": "Пользователь зарегистрирован"})
-
-@app.route('/rfid', methods=['GET'])
-def handle_rfid():
-    global pending_uid, registration_open
-    reader = request.args.get('reader')
-    uid = request.args.get('uid')
-    
-    if not reader or not uid:
-        return jsonify({"error": "Missing parameters"}), 400
-
-    print(f"📥 reader={reader}, uid={uid}")
-
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    # Проверяем, есть ли пользователь
-    c.execute("SELECT name, surname, is_inside FROM users WHERE uid = ?", (uid,))
-    user = c.fetchone()
-    
-    if not user:
-        # Создаём пользователя с временным именем
-        c.execute("INSERT INTO users (uid, name, surname, is_inside) VALUES (?, 'User', 'User', 0)", (uid,))
-        c.execute("INSERT INTO events (action, uid, timestamp) VALUES ('register', ?, ?)", (uid, now))
-        conn.commit()
-        c.execute("SELECT name, surname, is_inside FROM users WHERE uid = ?", (uid,))
-        user = c.fetchone()
-        # Сохраняем UID для регистрации на сайте
-        pending_uid = uid
-
-    name, surname, is_inside = user
-
-    if reader == "1":  # ВХОД
-        if is_inside:
-            action = "blocked_enter"
-        else:
-            action = "enter"
-            c.execute("UPDATE users SET is_inside = 1 WHERE uid = ?", (uid,))
-    elif reader == "2":  # ВЫХОД
-        if not is_inside:
-            action = "blocked_exit"
-        else:
-            action = "exit"
-            c.execute("UPDATE users SET is_inside = 0 WHERE uid = ?", (uid,))
-    else:
-        conn.close()
-        return jsonify({"error": "Invalid reader"}), 400
-
-    c.execute("INSERT INTO events (action, uid, timestamp) VALUES (?, ?, ?)", (action, uid, now))
-    conn.commit()
-    conn.close()
-    return jsonify({"status": "ok", "name": name, "surname": surname})
-
-@app.route('/api/get-users', methods=['GET'])
-def get_users():
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT action, uid, timestamp FROM events ORDER BY id DESC LIMIT 50")
-    events = c.fetchall()
-    c.execute("SELECT uid, name, surname, is_inside FROM users")
-    users = [{"uid": row[0], "name": row[1], "surname": row[2], "is_inside": row[3]} for row in c.fetchall()]
-    conn.close()
-    return jsonify({"events": events, "users": users})
-
-@app.route('/api/public-data', methods=['GET'])
-def public_data():
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT COUNT(*) FROM users WHERE is_inside = 1")
-    inside_count = c.fetchone()[0]
-    c.execute("SELECT timestamp FROM events ORDER BY id DESC LIMIT 1")
-    row = c.fetchone()
-    last_time = row[0] if row else ""
-    conn.close()
-    return jsonify({
-        "inside_count": inside_count,
-        "last_time": last_time,
-        "registration_open": registration_open,
-        "pending_uid": pending_uid
-    })
-
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port)
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=False)
