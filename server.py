@@ -9,7 +9,7 @@ CORS(app)
 
 DB_FILE = 'rfid_logs.db'
 
-# ==================== КРАСИВЫЙ ПУБЛИЧНЫЙ САЙТ ====================
+# ==================== ПУБЛИЧНЫЙ САЙТ ====================
 PUBLIC_HTML = """
 <!DOCTYPE html>
 <html>
@@ -66,6 +66,30 @@ body {
   margin-top: 20px;
 }
 .card h2 { color: #f5a623; margin-bottom: 15px; font-size: 1.2em; }
+.reg-form { margin-top: 15px; padding-top: 15px; border-top: 1px solid rgba(255,255,255,0.1); }
+.input-group { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; margin-top: 10px; }
+.input-group input {
+  padding: 10px;
+  border-radius: 8px;
+  border: 1px solid #555;
+  background: #222;
+  color: white;
+  min-width: 120px;
+  flex: 1;
+}
+.btn {
+  background: #e94560;
+  border: none;
+  color: white;
+  padding: 10px 25px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 1em;
+  transition: 0.3s;
+}
+.btn:hover { opacity: 0.8; }
+.btn-green { background: #2ecc71; }
+.reg-message { margin-top: 10px; font-size: 0.95em; color: #aaa; }
 .footer { margin-top: 30px; color: #555; font-size: 0.8em; }
 </style>
 </head>
@@ -73,33 +97,78 @@ body {
 <div class="container">
   <div class="header"><h1>🏢 RFID Контроль доступа</h1><p style="color:#aaa;">Текущий статус системы</p></div>
   <div class="stats">
-    <div class="stat-card">
-      <div class="number" id="currentPeople">0</div>
-      <div class="label">👤 Людей внутри</div>
-    </div>
-    <div class="stat-card">
-      <div class="number" id="lastEventTime">--:--</div>
-      <div class="label">🕒 Последнее событие</div>
-    </div>
+    <div class="stat-card"><div class="number" id="currentPeople">0</div><div class="label">👤 Людей внутри</div></div>
+    <div class="stat-card"><div class="number" id="lastEventTime">--:--</div><div class="label">🕒 Последнее событие</div></div>
   </div>
   <div class="card">
     <h2>📝 Регистрация</h2>
     <div id="regStatus" style="color:#aaa;">🔒 Регистрация закрыта</div>
+    <div class="reg-form" id="regForm" style="display:none;">
+      <p style="color: #aaa; font-size: 0.9em;">Приложите карту к RFID и введите данные</p>
+      <div class="input-group">
+        <input type="text" id="regName" placeholder="Имя">
+        <input type="text" id="regSurname" placeholder="Фамилия">
+        <button class="btn btn-green" id="regBtn">Зарегистрироваться</button>
+      </div>
+      <div id="regMessage" class="reg-message"></div>
+    </div>
   </div>
   <div class="footer"><span>Система работает</span></div>
 </div>
 <script>
+const API_URL = window.location.origin;
+let pendingUid = null;
+
+document.getElementById('regBtn').addEventListener('click', async () => {
+  const name = document.getElementById('regName').value.trim();
+  const surname = document.getElementById('regSurname').value.trim();
+  const msg = document.getElementById('regMessage');
+  if (!name || !surname) { msg.innerHTML = '<span style="color:#f1c40f;">Введите имя и фамилию</span>'; return; }
+  if (!pendingUid) { msg.innerHTML = '<span style="color:#e74c3c;">Сначала приложите карту к RFID</span>'; return; }
+  try {
+    const resp = await fetch(API_URL + '/confirm-registration', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ uid: pendingUid, name, surname })
+    });
+    const data = await resp.json();
+    if (data.status === 'ok') {
+      msg.innerHTML = '<span style="color:#2ecc71;">✅ Вы зарегистрированы!</span>';
+      document.getElementById('regName').value = '';
+      document.getElementById('regSurname').value = '';
+      pendingUid = null;
+      loadData();
+    } else {
+      msg.innerHTML = `<span style="color:#e74c3c;">❌ ${data.message || 'Ошибка'}</span>`;
+    }
+  } catch (e) { msg.innerHTML = '<span style="color:#e74c3c;">Ошибка соединения</span>'; }
+});
+
 async function loadData() {
   try {
-    const resp = await fetch('/api/public-data');
+    const resp = await fetch(API_URL + '/api/public-data');
     const data = await resp.json();
     document.getElementById('currentPeople').textContent = data.inside_count || 0;
     document.getElementById('lastEventTime').textContent = data.last_time ? data.last_time.substring(11, 16) : '--:--';
+    
     const status = document.getElementById('regStatus');
+    const form = document.getElementById('regForm');
+    const msg = document.getElementById('regMessage');
+    
     if (data.registration_open) {
       status.innerHTML = '✅ Регистрация <span style="color:#2ecc71;">ОТКРЫТА</span>';
+      form.style.display = 'block';
     } else {
       status.innerHTML = '🔒 Регистрация <span style="color:#e74c3c;">ЗАКРЫТА</span>';
+      form.style.display = 'none';
+      msg.innerHTML = '';
+    }
+    
+    pendingUid = data.pending_uid || null;
+    if (pendingUid && data.registration_open) {
+      msg.innerHTML = `<span style="color:#3498db;">Карта ${pendingUid} ожидает регистрации</span>`;
+    } else if (data.registration_open) {
+      msg.innerHTML = '<span style="color:#aaa;">Приложите карту к RFID</span>';
     }
   } catch (e) { console.error(e); }
 }
@@ -110,7 +179,7 @@ loadData();
 </html>
 """
 
-# ==================== КРАСИВАЯ АДМИН-ПАНЕЛЬ ====================
+# ==================== АДМИН-ПАНЕЛЬ ====================
 ADMIN_HTML = """
 <!DOCTYPE html>
 <html>
@@ -197,6 +266,9 @@ td { padding: 12px; border-bottom: 1px solid rgba(255,255,255,0.05); }
 .led { width: 20px; height: 20px; border-radius: 50%; display: inline-block; transition: 0.3s; }
 .led-green { background: #2ecc71; box-shadow: 0 0 15px #2ecc71; }
 .led-red { background: #e74c3c; box-shadow: 0 0 15px #e74c3c; }
+.input-group { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
+.input-group input { flex: 1; padding: 10px; border-radius: 8px; border: 1px solid #555; background: #222; color: white; min-width: 150px; }
+.reg-message { margin-top: 10px; font-size: 0.95em; }
 </style>
 </head>
 <body>
@@ -228,6 +300,16 @@ td { padding: 12px; border-bottom: 1px solid rgba(255,255,255,0.05); }
             <span id="regStatusText">Закрыта</span>
           </div>
           <button class="btn" id="toggleRegBtn">Открыть регистрацию</button>
+          <div id="registrationForm" style="display:none;margin-top:20px;border-top:1px solid #444;padding-top:20px;">
+            <h3 style="color:#f5a623;">Зарегистрировать карту</h3>
+            <p style="color:#aaa;font-size:0.9em;">Приложите карту к RFID, затем введите имя и фамилию</p>
+            <div class="input-group">
+              <input type="text" id="regName" placeholder="Имя">
+              <input type="text" id="regSurname" placeholder="Фамилия">
+              <button class="btn btn-green" id="confirmRegBtn">Подтвердить</button>
+            </div>
+            <div id="regMessage" class="reg-message"></div>
+          </div>
         </div>
       </div>
       <div class="card" style="margin-top:20px;">
@@ -241,17 +323,18 @@ td { padding: 12px; border-bottom: 1px solid rgba(255,255,255,0.05); }
 </div>
 <script>
 const API_URL = window.location.origin;
-let regOpen = false;
+let regOpen = false, pendingUid = null;
 
 function updateRegUI() {
   const led = document.getElementById('regLed'), text = document.getElementById('regStatusText');
-  const btn = document.getElementById('toggleRegBtn');
+  const btn = document.getElementById('toggleRegBtn'), form = document.getElementById('registrationForm');
   if (regOpen) {
     led.className = 'led led-green'; text.textContent = 'Открыта';
-    btn.textContent = 'Закрыть регистрацию';
+    btn.textContent = 'Закрыть регистрацию'; form.style.display = 'block';
   } else {
     led.className = 'led led-red'; text.textContent = 'Закрыта';
-    btn.textContent = 'Открыть регистрацию';
+    btn.textContent = 'Открыть регистрацию'; form.style.display = 'none';
+    document.getElementById('regMessage').innerHTML = '';
   }
 }
 
@@ -259,6 +342,26 @@ document.getElementById('toggleRegBtn').addEventListener('click', async () => {
   const resp = await fetch(API_URL + '/toggle-registration', { method: 'POST' });
   const data = await resp.json();
   regOpen = data.open; updateRegUI();
+});
+
+document.getElementById('confirmRegBtn').addEventListener('click', async () => {
+  const name = document.getElementById('regName').value.trim();
+  const surname = document.getElementById('regSurname').value.trim();
+  const msg = document.getElementById('regMessage');
+  if (!name || !surname) { msg.innerHTML = '<span style="color:#f1c40f;">Введите имя и фамилию</span>'; return; }
+  if (!pendingUid) { msg.innerHTML = '<span style="color:#e74c3c;">Сначала приложите карту к RFID</span>'; return; }
+  const resp = await fetch(API_URL + '/confirm-registration', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ uid: pendingUid, name, surname })
+  });
+  const data = await resp.json();
+  if (data.status === 'ok') {
+    msg.innerHTML = '<span style="color:#2ecc71;">✅ Пользователь зарегистрирован!</span>';
+    document.getElementById('regName').value = ''; document.getElementById('regSurname').value = '';
+    pendingUid = null; loadData();
+  } else {
+    msg.innerHTML = `<span style="color:#e74c3c;">❌ ${data.message || 'Ошибка'}</span>`;
+  }
 });
 
 async function loadData() {
@@ -299,7 +402,10 @@ async function loadData() {
   }
   const sr = await fetch(API_URL + '/api/registration-status');
   const sd = await sr.json();
-  regOpen = sd.open; updateRegUI();
+  regOpen = sd.open; pendingUid = sd.pending_uid || null;
+  updateRegUI();
+  if (pendingUid) document.getElementById('regMessage').innerHTML = `<span style="color:#3498db;">Карта ${pendingUid} ожидает регистрации</span>`;
+  else if (regOpen) document.getElementById('regMessage').innerHTML = '<span style="color:#aaa;">Приложите карту к RFID</span>';
 }
 setInterval(loadData, 2000); loadData();
 </script>
@@ -331,6 +437,7 @@ def init_db():
 init_db()
 
 registration_open = False
+pending_uid = None
 
 # ==================== API ====================
 @app.route('/')
@@ -343,45 +450,85 @@ def admin():
 
 @app.route('/toggle-registration', methods=['POST'])
 def toggle_registration():
-    global registration_open
+    global registration_open, pending_uid
     registration_open = not registration_open
+    if not registration_open:
+        pending_uid = None
     return jsonify({"open": registration_open})
 
 @app.route('/api/registration-status', methods=['GET'])
 def registration_status():
-    return jsonify({"open": registration_open})
+    return jsonify({"open": registration_open, "pending_uid": pending_uid})
+
+@app.route('/confirm-registration', methods=['POST'])
+def confirm_registration():
+    global pending_uid
+    data = request.get_json()
+    uid = data.get('uid')
+    name = data.get('name')
+    surname = data.get('surname')
+    
+    if not uid or not name or not surname:
+        return jsonify({"status": "error", "message": "Не все поля заполнены"}), 400
+    if pending_uid != uid:
+        return jsonify({"status": "error", "message": "UID не совпадает"}), 400
+        
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT uid FROM users WHERE uid = ?", (uid,))
+    if c.fetchone():
+        pending_uid = None
+        conn.close()
+        return jsonify({"status": "error", "message": "Карта уже зарегистрирована"}), 400
+        
+    c.execute("UPDATE users SET name = ?, surname = ? WHERE uid = ?", (name, surname, uid))
+    if c.rowcount == 0:
+        c.execute("INSERT INTO users (uid, name, surname, is_inside) VALUES (?, ?, ?, 0)", (uid, name, surname))
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    c.execute("INSERT INTO events (action, uid, timestamp) VALUES ('register', ?, ?)", (uid, now))
+    conn.commit()
+    conn.close()
+    pending_uid = None
+    return jsonify({"status": "ok", "message": "Пользователь зарегистрирован"})
 
 @app.route('/rfid', methods=['GET'])
 def handle_rfid():
+    global pending_uid, registration_open
     reader = request.args.get('reader')
     uid = request.args.get('uid')
     
     if not reader or not uid:
         return jsonify({"error": "Missing parameters"}), 400
 
+    print(f"📥 reader={reader}, uid={uid}")
+
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+    # Проверяем, есть ли пользователь
     c.execute("SELECT name, surname, is_inside FROM users WHERE uid = ?", (uid,))
     user = c.fetchone()
     
     if not user:
+        # Создаём пользователя с временным именем
         c.execute("INSERT INTO users (uid, name, surname, is_inside) VALUES (?, 'User', 'User', 0)", (uid,))
         c.execute("INSERT INTO events (action, uid, timestamp) VALUES ('register', ?, ?)", (uid, now))
         conn.commit()
         c.execute("SELECT name, surname, is_inside FROM users WHERE uid = ?", (uid,))
         user = c.fetchone()
+        # Сохраняем UID для регистрации на сайте
+        pending_uid = uid
 
     name, surname, is_inside = user
 
-    if reader == "1":
+    if reader == "1":  # ВХОД
         if is_inside:
             action = "blocked_enter"
         else:
             action = "enter"
             c.execute("UPDATE users SET is_inside = 1 WHERE uid = ?", (uid,))
-    elif reader == "2":
+    elif reader == "2":  # ВЫХОД
         if not is_inside:
             action = "blocked_exit"
         else:
@@ -394,7 +541,7 @@ def handle_rfid():
     c.execute("INSERT INTO events (action, uid, timestamp) VALUES (?, ?, ?)", (action, uid, now))
     conn.commit()
     conn.close()
-    return jsonify({"status": "ok"})
+    return jsonify({"status": "ok", "name": name, "surname": surname})
 
 @app.route('/api/get-users', methods=['GET'])
 def get_users():
@@ -420,7 +567,8 @@ def public_data():
     return jsonify({
         "inside_count": inside_count,
         "last_time": last_time,
-        "registration_open": registration_open
+        "registration_open": registration_open,
+        "pending_uid": pending_uid
     })
 
 if __name__ == '__main__':
