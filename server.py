@@ -9,7 +9,7 @@ CORS(app)
 
 DB_FILE = 'rfid_logs.db'
 
-# ==================== ПУБЛИЧНЫЙ САЙТ ====================
+# ==================== КРАСИВЫЙ ПУБЛИЧНЫЙ САЙТ ====================
 PUBLIC_HTML = """
 <!DOCTYPE html>
 <html>
@@ -28,57 +28,89 @@ body {
   align-items: center;
   padding: 20px;
 }
-.container { max-width: 500px; width: 100%; text-align: center; }
-h1 {
+.container { max-width: 600px; width: 100%; text-align: center; }
+.header h1 {
   font-size: 2.5em;
   background: linear-gradient(135deg, #2ecc71, #f5a623);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   margin-bottom: 10px;
 }
-.card {
+.stats {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+  margin: 30px 0;
+}
+.stat-card {
   background: rgba(255,255,255,0.05);
   backdrop-filter: blur(10px);
+  padding: 20px;
   border-radius: 15px;
-  padding: 30px;
   border: 1px solid rgba(255,255,255,0.1);
-  margin-top: 20px;
 }
-.number {
-  font-size: 4em;
+.stat-card .number {
+  font-size: 3em;
   font-weight: bold;
   background: linear-gradient(135deg, #2ecc71, #f5a623);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
 }
-.label { color: #aaa; margin-top: 10px; font-size: 1.1em; }
+.stat-card .label { color: #aaa; margin-top: 5px; font-size: 0.9em; }
+.card {
+  background: rgba(255,255,255,0.05);
+  backdrop-filter: blur(10px);
+  border-radius: 15px;
+  padding: 25px;
+  border: 1px solid rgba(255,255,255,0.1);
+  margin-top: 20px;
+}
+.card h2 { color: #f5a623; margin-bottom: 15px; font-size: 1.2em; }
 .footer { margin-top: 30px; color: #555; font-size: 0.8em; }
 </style>
 </head>
 <body>
 <div class="container">
-  <h1>🏢 RFID Контроль доступа</h1>
-  <div class="card">
-    <div class="number" id="count">0</div>
-    <div class="label">👤 Людей внутри</div>
+  <div class="header"><h1>🏢 RFID Контроль доступа</h1><p style="color:#aaa;">Текущий статус системы</p></div>
+  <div class="stats">
+    <div class="stat-card">
+      <div class="number" id="currentPeople">0</div>
+      <div class="label">👤 Людей внутри</div>
+    </div>
+    <div class="stat-card">
+      <div class="number" id="lastEventTime">--:--</div>
+      <div class="label">🕒 Последнее событие</div>
+    </div>
   </div>
-  <div class="footer">Система работает</div>
+  <div class="card">
+    <h2>📝 Регистрация</h2>
+    <div id="regStatus" style="color:#aaa;">🔒 Регистрация закрыта</div>
+  </div>
+  <div class="footer"><span>Система работает</span></div>
 </div>
 <script>
-function update() {
-  fetch('/api/public-data')
-    .then(r => r.json())
-    .then(d => document.getElementById('count').textContent = d.inside_count)
-    .catch(() => {});
+async function loadData() {
+  try {
+    const resp = await fetch('/api/public-data');
+    const data = await resp.json();
+    document.getElementById('currentPeople').textContent = data.inside_count || 0;
+    document.getElementById('lastEventTime').textContent = data.last_time ? data.last_time.substring(11, 16) : '--:--';
+    const status = document.getElementById('regStatus');
+    if (data.registration_open) {
+      status.innerHTML = '✅ Регистрация <span style="color:#2ecc71;">ОТКРЫТА</span>';
+    } else {
+      status.innerHTML = '🔒 Регистрация <span style="color:#e74c3c;">ЗАКРЫТА</span>';
+    }
+  } catch (e) { console.error(e); }
 }
-setInterval(update, 2000);
-update();
+setInterval(loadData, 2000);
+loadData();
 </script>
 </body>
 </html>
 """
 
-# ==================== АДМИН-ПАНЕЛЬ ====================
+# ==================== КРАСИВАЯ АДМИН-ПАНЕЛЬ ====================
 ADMIN_HTML = """
 <!DOCTYPE html>
 <html>
@@ -94,106 +126,182 @@ body {
   min-height: 100vh;
   padding: 20px;
 }
-.container { max-width: 1000px; margin: 0 auto; }
-h1 { text-align: center; margin-bottom: 30px; color: #e94560; }
+.container { max-width: 1200px; margin: 0 auto; }
+.header { text-align: center; padding: 30px 0; border-bottom: 2px solid rgba(255,255,255,0.1); margin-bottom: 30px; }
+.header h1 {
+  font-size: 2.5em;
+  background: linear-gradient(135deg, #e94560, #f5a623);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+.stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 20px;
+  margin-bottom: 30px;
+}
+.stat-card {
+  background: rgba(255,255,255,0.05);
+  backdrop-filter: blur(10px);
+  padding: 20px;
+  border-radius: 15px;
+  text-align: center;
+  border: 1px solid rgba(255,255,255,0.1);
+}
+.stat-card .number {
+  font-size: 2.5em;
+  font-weight: bold;
+  background: linear-gradient(135deg, #e94560, #f5a623);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+.stat-card .label { color: #aaa; margin-top: 5px; font-size: 0.9em; }
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 30px; }
+@media (max-width: 768px) { .grid-2 { grid-template-columns: 1fr; } }
 .card {
   background: rgba(255,255,255,0.05);
   backdrop-filter: blur(10px);
   border-radius: 15px;
-  padding: 20px;
+  padding: 25px;
   border: 1px solid rgba(255,255,255,0.1);
-  margin-bottom: 20px;
 }
-table { width: 100%; border-collapse: collapse; }
-th { text-align: left; padding: 10px; color: #aaa; border-bottom: 1px solid #333; }
-td { padding: 10px; border-bottom: 1px solid #222; }
+.card h2 { margin-bottom: 20px; font-size: 1.3em; color: #e94560; }
+table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+th { text-align: left; padding: 12px; border-bottom: 2px solid rgba(255,255,255,0.1); color: #aaa; font-weight: 400; font-size: 0.9em; }
+td { padding: 12px; border-bottom: 1px solid rgba(255,255,255,0.05); }
+.status-enter { color: #2ecc71; }
+.status-exit { color: #f1c40f; }
+.status-blocked { color: #e74c3c; }
+.status-register { color: #3498db; }
 .btn {
   background: #e94560;
   border: none;
   color: white;
-  padding: 8px 20px;
+  padding: 10px 25px;
   border-radius: 8px;
   cursor: pointer;
+  font-size: 1em;
+  transition: 0.3s;
 }
+.btn:hover { opacity: 0.8; }
 .btn-green { background: #2ecc71; }
-.btn-red { background: #e74c3c; }
-.led { display: inline-block; width: 16px; height: 16px; border-radius: 50%; margin-right: 10px; }
-.led-green { background: #2ecc71; }
-.led-red { background: #e74c3c; }
+.btn-danger { background: #e74c3c; padding: 5px 12px; font-size: 0.8em; }
+.reg-block {
+  margin-top: 20px;
+  padding: 20px;
+  background: rgba(255,255,255,0.03);
+  border-radius: 12px;
+  border: 1px solid rgba(255,255,255,0.1);
+}
+.reg-block .indicator { display: flex; align-items: center; gap: 15px; margin-bottom: 15px; }
+.led { width: 20px; height: 20px; border-radius: 50%; display: inline-block; transition: 0.3s; }
+.led-green { background: #2ecc71; box-shadow: 0 0 15px #2ecc71; }
+.led-red { background: #e74c3c; box-shadow: 0 0 15px #e74c3c; }
 </style>
 </head>
 <body>
 <div class="container">
-  <h1>🔐 RFID Админ-панель</h1>
-  
-  <div class="card">
-    <h2>📊 Статистика</h2>
-    <p>👤 Людей внутри: <strong id="count">0</strong></p>
-    <p>📋 Всего событий: <strong id="events">0</strong></p>
+  <div class="header"><h1>🔐 RFID Админ-панель</h1></div>
+  <div class="stats">
+    <div class="stat-card"><div class="number" id="totalEvents">0</div><div class="label">📊 Всего событий</div></div>
+    <div class="stat-card" style="border:1px solid #2ecc71;"><div class="number" id="currentPeople">0</div><div class="label">👤 Сейчас внутри</div></div>
+    <div class="stat-card"><div class="number" id="inMatch">0</div><div class="label">✅ Входов</div></div>
+    <div class="stat-card"><div class="number" id="outCount">0</div><div class="label">🚪 Выходов</div></div>
+    <div class="stat-card"><div class="number" id="lastEventTime">--:--</div><div class="label">🕒 Последнее событие</div></div>
   </div>
-
-  <div class="card">
-    <h2>📋 Пользователи</h2>
-    <div id="usersList">Загрузка...</div>
-  </div>
-
-  <div class="card">
-    <h2>📝 Управление регистрацией</h2>
-    <p>
-      <span class="led" id="regLed"></span>
-      <span id="regStatus">Закрыта</span>
-    </p>
-    <button class="btn" id="toggleRegBtn">Открыть регистрацию</button>
+  <div class="grid-2">
+    <div>
+      <div class="card">
+        <h2>📋 Лента событий</h2>
+        <div style="max-height:400px;overflow-y:auto;">
+          <table><thead><tr><th>Действие</th><th>Карта</th><th>Время</th></tr></thead><tbody id="eventsList"></tbody></table>
+        </div>
+      </div>
+    </div>
+    <div>
+      <div class="card">
+        <h2>👤 Управление</h2>
+        <div class="reg-block">
+          <div class="indicator">
+            <span>Статус регистрации:</span>
+            <span class="led" id="regLed"></span>
+            <span id="regStatusText">Закрыта</span>
+          </div>
+          <button class="btn" id="toggleRegBtn">Открыть регистрацию</button>
+        </div>
+      </div>
+      <div class="card" style="margin-top:20px;">
+        <h2>📋 Пользователи</h2>
+        <div style="max-height:300px;overflow-y:auto;">
+          <table><thead><tr><th>Имя</th><th>UID</th><th>Статус</th></tr></thead><tbody id="usersList"></tbody></table>
+        </div>
+      </div>
+    </div>
   </div>
 </div>
-
 <script>
 const API_URL = window.location.origin;
+let regOpen = false;
 
-async function loadData() {
-  const resp = await fetch(API_URL + '/api/get-users');
-  const data = await resp.json();
-  
-  document.getElementById('count').textContent = data.users.filter(u => u.is_inside).length;
-  document.getElementById('events').textContent = data.events.length;
-
-  const list = document.getElementById('usersList');
-  if (data.users.length === 0) {
-    list.innerHTML = '<p style="color:#aaa;">Нет зарегистрированных пользователей</p>';
-  } else {
-    let html = '<table><tr><th>Имя</th><th>UID</th><th>Статус</th></tr>';
-    data.users.forEach(u => {
-      const status = u.is_inside ? 'Внутри' : 'Снаружи';
-      const color = u.is_inside ? '#2ecc71' : '#f1c40f';
-      html += `<tr><td>${u.name} ${u.surname}</td><td>${u.uid}</td><td style="color:${color}">${status}</td></tr>`;
-    });
-    html += '</table>';
-    list.innerHTML = html;
-  }
-
-  const sr = await fetch(API_URL + '/api/registration-status');
-  const sd = await sr.json();
-  const led = document.getElementById('regLed');
-  const text = document.getElementById('regStatus');
+function updateRegUI() {
+  const led = document.getElementById('regLed'), text = document.getElementById('regStatusText');
   const btn = document.getElementById('toggleRegBtn');
-  if (sd.open) {
-    led.className = 'led led-green';
-    text.textContent = 'Открыта';
+  if (regOpen) {
+    led.className = 'led led-green'; text.textContent = 'Открыта';
     btn.textContent = 'Закрыть регистрацию';
   } else {
-    led.className = 'led led-red';
-    text.textContent = 'Закрыта';
+    led.className = 'led led-red'; text.textContent = 'Закрыта';
     btn.textContent = 'Открыть регистрацию';
   }
 }
 
 document.getElementById('toggleRegBtn').addEventListener('click', async () => {
-  await fetch(API_URL + '/toggle-registration', { method: 'POST' });
-  loadData();
+  const resp = await fetch(API_URL + '/toggle-registration', { method: 'POST' });
+  const data = await resp.json();
+  regOpen = data.open; updateRegUI();
 });
 
-setInterval(loadData, 2000);
-loadData();
+async function loadData() {
+  const resp = await fetch(API_URL + '/api/get-users');
+  const data = await resp.json();
+  const list = document.getElementById('eventsList');
+  list.innerHTML = '';
+  let total=0, count1=0, count2=0, inside=0, last='--:--';
+  if (data.events && data.events.length > 0) {
+    total = data.events.length; last = data.events[0][2].substring(11,16);
+    data.events.forEach(ev => {
+      let a=ev[0], u=ev[1], t=ev[2], cls='', txt='';
+      if (a==='enter') { count1++; inside++; cls='status-enter'; txt='✅ Вход'; }
+      else if (a==='exit') { count2++; inside--; cls='status-exit'; txt='🚪 Выход'; }
+      else if (a==='register'||a==='register_request') { cls='status-register'; txt='📝 Регистрация'; }
+      else if (a==='blocked_enter') { cls='status-blocked'; txt='⛔ Блокировка входа'; }
+      else if (a==='blocked_exit') { cls='status-blocked'; txt='⛔ Блокировка выхода'; }
+      else { cls='status-blocked'; txt='⛔ '+a; }
+      list.innerHTML += `<tr><td class="${cls}">${txt}</td><td>${u}</td><td>${t}</td></tr>`;
+    });
+  }
+  document.getElementById('totalEvents').textContent = total;
+  document.getElementById('currentPeople').textContent = inside < 0 ? 0 : inside;
+  document.getElementById('inMatch').textContent = count1;
+  document.getElementById('outCount').textContent = count2;
+  document.getElementById('lastEventTime').textContent = last;
+
+  const usersList = document.getElementById('usersList');
+  usersList.innerHTML = '';
+  if (data.users && data.users.length > 0) {
+    data.users.forEach(u => {
+      const status = u.is_inside ? 'Внутри' : 'Снаружи';
+      const color = u.is_inside ? '#2ecc71' : '#f1c40f';
+      usersList.innerHTML += `<tr><td>${u.name} ${u.surname}</td><td>${u.uid}</td><td style="color:${color}">${status}</td></tr>`;
+    });
+  } else {
+    usersList.innerHTML = '<tr><td colspan="3" style="color:#aaa;">Нет пользователей</td></tr>';
+  }
+  const sr = await fetch(API_URL + '/api/registration-status');
+  const sd = await sr.json();
+  regOpen = sd.open; updateRegUI();
+}
+setInterval(loadData, 2000); loadData();
 </script>
 </body>
 </html>
@@ -305,8 +413,15 @@ def public_data():
     c = conn.cursor()
     c.execute("SELECT COUNT(*) FROM users WHERE is_inside = 1")
     inside_count = c.fetchone()[0]
+    c.execute("SELECT timestamp FROM events ORDER BY id DESC LIMIT 1")
+    row = c.fetchone()
+    last_time = row[0] if row else ""
     conn.close()
-    return jsonify({"inside_count": inside_count})
+    return jsonify({
+        "inside_count": inside_count,
+        "last_time": last_time,
+        "registration_open": registration_open
+    })
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
