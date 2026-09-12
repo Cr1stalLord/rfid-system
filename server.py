@@ -1,228 +1,349 @@
-# ==================================================================
-# RFID Access Control — сервер (Python / Flask)
-#
-# Это точный порт server.js (Node/Express) на Python.
-# Вся логика, все эндпоинты, все правила поведения — без изменений.
-# Визуальная часть (index.html, admin.html) НЕ менялась вообще.
-#
-# 1) "При открытой регистрации скан карты сразу логинит меня в систему"
-#    -> Скан на reader=2 при открытой регистрации только помечает
-#       pending_uid ("карта ждёт форму"). Пользователь создаётся
-#       только через POST /confirm-registration, и is_inside при
-#       этом НЕ включается. Чтобы войти — нужно отдельно сканировать
-#       карту на считывателе входа (reader=1).
-#
-# 2) "Не могу выйти из системы"
-#    -> exit (reader=2 при ЗАКРЫТОЙ регистрации) БЕЗУСЛОВНО
-#       ставит is_inside = false и пишет событие exit.
-# ==================================================================
-
-import json
+from flask import Flask, request, jsonify, render_template_string
+from flask_cors import CORS
+import sqlite3
+import datetime
 import os
-from datetime import datetime
 
-from flask import Flask, jsonify, request, send_from_directory
+app = Flask(__name__)
+CORS(app)
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-PUBLIC_DIR = os.path.join(BASE_DIR, "public")
-DB_FILE = os.path.join(BASE_DIR, "db.json")
+DB_FILE = 'rfid_logs.db'
 
-app = Flask(__name__, static_folder=None)
+# ==================== ПУБЛИЧНЫЙ САЙТ ====================
+PUBLIC_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>RFID Контроль доступа</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: 'Segoe UI', Arial, sans-serif;
+  background: linear-gradient(135deg, #1a1a2e, #16213e, #0f3460);
+  color: white;
+  min-height: 100vh;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 20px;
+}
+.container { max-width: 600px; width: 100%; text-align: center; }
+h1 {
+  font-size: 2.5em;
+  background: linear-gradient(135deg, #2ecc71, #f5a623);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  margin-bottom: 10px;
+}
+.stats {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+  margin: 30px 0;
+}
+.stat-card {
+  background: rgba(255,255,255,0.05);
+  backdrop-filter: blur(10px);
+  padding: 20px;
+  border-radius: 15px;
+  border: 1px solid rgba(255,255,255,0.1);
+}
+.stat-card .number {
+  font-size: 3em;
+  font-weight: bold;
+  background: linear-gradient(135deg, #2ecc71, #f5a623);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+.stat-card .label { color: #aaa; margin-top: 5px; font-size: 0.9em; }
+.card {
+  background: rgba(255,255,255,0.05);
+  backdrop-filter: blur(10px);
+  border-radius: 15px;
+  padding: 25px;
+  border: 1px solid rgba(255,255,255,0.1);
+  margin-top: 20px;
+}
+.card h2 { color: #f5a623; margin-bottom: 15px; font-size: 1.2em; }
+.footer { margin-top: 30px; color: #555; font-size: 0.8em; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>🏢 RFID Контроль доступа</h1>
+  <p style="color:#aaa;">Текущий статус системы</p>
+  <div class="stats">
+    <div class="stat-card">
+      <div class="number" id="currentPeople">0</div>
+      <div class="label">👤 Людей внутри</div>
+    </div>
+    <div class="stat-card">
+      <div class="number" id="lastEventTime">--:--</div>
+      <div class="label">🕒 Последнее событие</div>
+    </div>
+  </div>
+  <div class="card">
+    <h2>📝 Регистрация</h2>
+    <div id="regStatus" style="color:#aaa;">🔒 Регистрация закрыта</div>
+  </div>
+  <div class="footer">Система работает</div>
+</div>
+<script>
+async function loadData() {
+  try {
+    const resp = await fetch('/api/public-data');
+    const data = await resp.json();
+    document.getElementById('currentPeople').textContent = data.inside_count || 0;
+    document.getElementById('lastEventTime').textContent = data.last_time ? data.last_time.substring(11, 16) : '--:--';
+    const status = document.getElementById('regStatus');
+    if (data.registration_open) {
+      status.innerHTML = '✅ Регистрация <span style="color:#2ecc71;">ОТКРЫТА</span>';
+    } else {
+      status.innerHTML = '🔒 Регистрация <span style="color:#e74c3c;">ЗАКРЫТА</span>';
+    }
+  } catch (e) { console.error(e); }
+}
+setInterval(loadData, 2000);
+loadData();
+</script>
+</body>
+</html>
+"""
 
-# ---------------------- Состояние в памяти ----------------------
-state = {
-    "registration_open": False,
-    "pending_uid": None,
-    "users": {},   # uid -> { uid, name, surname, registered, is_inside, created_at }
-    "events": []   # [{ timestamp, action, uid }], новые — в начале списка
+# ==================== АДМИН-ПАНЕЛЬ ====================
+ADMIN_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>RFID Админ-панель</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: 'Segoe UI', Arial, sans-serif;
+  background: linear-gradient(135deg, #1a1a2e, #16213e, #0f3460);
+  color: white;
+  min-height: 100vh;
+  padding: 20px;
+}
+.container { max-width: 1000px; margin: 0 auto; }
+h1 { text-align: center; margin-bottom: 30px; color: #e94560; }
+.card {
+  background: rgba(255,255,255,0.05);
+  border-radius: 15px;
+  padding: 20px;
+  border: 1px solid rgba(255,255,255,0.1);
+  margin-bottom: 20px;
+}
+table { width: 100%; border-collapse: collapse; }
+th { text-align: left; padding: 10px; color: #aaa; border-bottom: 1px solid #333; }
+td { padding: 10px; border-bottom: 1px solid #222; }
+.btn {
+  background: #e94560;
+  border: none;
+  color: white;
+  padding: 10px 20px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.btn-green { background: #2ecc71; }
+.led { display: inline-block; width: 16px; height: 16px; border-radius: 50%; margin-right: 10px; }
+.led-green { background: #2ecc71; }
+.led-red { background: #e74c3c; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>🔐 RFID Админ-панель</h1>
+
+  <div class="card">
+    <h2>📊 Статистика</h2>
+    <p>👤 Людей внутри: <strong id="count">0</strong></p>
+    <p>📋 Всего событий: <strong id="events">0</strong></p>
+  </div>
+
+  <div class="card">
+    <h2>📝 Управление регистрацией</h2>
+    <p>
+      <span class="led" id="regLed"></span>
+      <span id="regStatus">Закрыта</span>
+    </p>
+    <button class="btn" id="toggleRegBtn">Открыть регистрацию</button>
+  </div>
+
+  <div class="card">
+    <h2>📋 Пользователи</h2>
+    <div id="usersList">Загрузка...</div>
+  </div>
+</div>
+
+<script>
+async function loadData() {
+  const resp = await fetch('/api/get-users');
+  const data = await resp.json();
+  document.getElementById('count').textContent = data.users.filter(u => u.is_inside).length;
+  document.getElementById('events').textContent = data.events.length;
+
+  const list = document.getElementById('usersList');
+  if (data.users.length === 0) {
+    list.innerHTML = '<p style="color:#aaa;">Нет пользователей</p>';
+  } else {
+    let html = '<table><tr><th>Имя</th><th>UID</th><th>Статус</th></tr>';
+    data.users.forEach(u => {
+      const status = u.is_inside ? 'Внутри' : 'Снаружи';
+      const color = u.is_inside ? '#2ecc71' : '#f1c40f';
+      html += `<tr><td>${u.name} ${u.surname}</td><td>${u.uid}</td><td style="color:${color}">${status}</td></tr>`;
+    });
+    html += '</table>';
+    list.innerHTML = html;
+  }
+
+  const sr = await fetch('/api/registration-status');
+  const sd = await sr.json();
+  const led = document.getElementById('regLed');
+  const text = document.getElementById('regStatus');
+  const btn = document.getElementById('toggleRegBtn');
+  if (sd.open) {
+    led.className = 'led led-green';
+    text.textContent = 'Открыта';
+    btn.textContent = 'Закрыть регистрацию';
+  } else {
+    led.className = 'led led-red';
+    text.textContent = 'Закрыта';
+    btn.textContent = 'Открыть регистрацию';
+  }
 }
 
+document.getElementById('toggleRegBtn').addEventListener('click', async () => {
+  await fetch('/toggle-registration', { method: 'POST' });
+  loadData();
+});
 
-# ---------------------- Персистентность (best-effort) ----------------------
-def load_state():
-    global state
-    try:
-        if os.path.exists(DB_FILE):
-            with open(DB_FILE, "r", encoding="utf-8") as f:
-                parsed = json.load(f)
-            state.update(parsed)
-            print("✅ Состояние загружено из db.json")
-    except Exception as e:
-        print(f"⚠️ Не удалось загрузить db.json: {e}")
+setInterval(loadData, 2000);
+loadData();
+</script>
+</body>
+</html>
+"""
 
+# ==================== БАЗА ДАННЫХ ====================
+def init_db():
+    if os.path.exists(DB_FILE):
+        os.remove(DB_FILE)
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''CREATE TABLE users (
+        uid TEXT PRIMARY KEY,
+        name TEXT,
+        surname TEXT,
+        is_inside INTEGER DEFAULT 0
+    )''')
+    c.execute('''CREATE TABLE events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        action TEXT NOT NULL,
+        uid TEXT NOT NULL,
+        timestamp TEXT NOT NULL
+    )''')
+    conn.commit()
+    conn.close()
 
-def save_state():
-    try:
-        with open(DB_FILE, "w", encoding="utf-8") as f:
-            json.dump(state, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"⚠️ Не удалось сохранить db.json: {e}")
+init_db()
 
+registration_open = False
 
-load_state()
+# ==================== API ====================
+@app.route('/')
+def home():
+    return render_template_string(PUBLIC_HTML)
 
+@app.route('/admin')
+def admin():
+    return render_template_string(ADMIN_HTML)
 
-# ---------------------- Вспомогательные функции ----------------------
-def now_str():
-    # Аналог toLocaleString('ru-RU', {day/month/year 2-digit, hour/min/sec 2-digit})
-    return datetime.now().strftime("%d.%m.%y, %H:%M:%S")
-
-
-def push_event(action, uid):
-    state["events"].insert(0, {"timestamp": now_str(), "action": action, "uid": uid})
-    # ограничим ленту, чтобы файл не рос бесконечно
-    if len(state["events"]) > 500:
-        del state["events"][500:]
-
-
-def get_stats():
-    users_arr = list(state["users"].values())
-    return {
-        "total_events": len(state["events"]),
-        "inside_count": sum(1 for u in users_arr if u.get("is_inside")),
-        "entries": sum(1 for e in state["events"] if e["action"] == "entry"),
-        "exits": sum(1 for e in state["events"] if e["action"] == "exit"),
-    }
-
-
-# ==================================================================
-#                          ПУБЛИЧНОЕ API
-# ==================================================================
-
-@app.get("/api/registration-status")
-def registration_status():
-    return jsonify({
-        "registration_open": state["registration_open"],
-        "pending_uid": state["pending_uid"],
-    })
-
-
-@app.get("/api/public-data")
-def public_data():
-    last = state["events"][0] if state["events"] else None
-    return jsonify({
-        "inside_count": get_stats()["inside_count"],
-        "last_event_time": last["timestamp"] if last else None,
-        "last_event_action": last["action"] if last else None,
-        "last_event_uid": last["uid"] if last else None,
-    })
-
-
-@app.get("/api/get-users")
-def get_users():
-    return jsonify({
-        "stats": get_stats(),
-        "events": state["events"],
-        "users": list(state["users"].values()),
-    })
-
-
-@app.post("/toggle-registration")
+@app.route('/toggle-registration', methods=['POST'])
 def toggle_registration():
-    state["registration_open"] = not state["registration_open"]
-    # при закрытии регистрации сбрасываем "зависшую" карту, если её не успели подтвердить
-    if not state["registration_open"]:
-        state["pending_uid"] = None
-    save_state()
-    return jsonify({"status": "ok", "registration_open": state["registration_open"]})
+    global registration_open
+    registration_open = not registration_open
+    return jsonify({"open": registration_open})
 
+@app.route('/api/registration-status', methods=['GET'])
+def registration_status():
+    return jsonify({"open": registration_open})
 
-@app.post("/confirm-registration")
-def confirm_registration():
-    body = request.get_json(silent=True) or {}
-    name = body.get("name")
-    surname = body.get("surname")
+@app.route('/rfid', methods=['GET'])
+def handle_rfid():
+    reader = request.args.get('reader')
+    uid = request.args.get('uid')
+    action = request.args.get('action', '')
 
-    if not state["registration_open"]:
-        return jsonify({"status": "error", "message": "Регистрация закрыта"}), 400
-    if not state["pending_uid"]:
-        return jsonify({"status": "error", "message": "Сначала приложите карту к считывателю №3"}), 400
-    if not name or not surname:
-        return jsonify({"status": "error", "message": "Заполните имя и фамилию"}), 400
+    if not reader or not uid:
+        return jsonify({"error": "Missing parameters"}), 400
 
-    uid = state["pending_uid"]
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    state["users"][uid] = {
-        "uid": uid,
-        "name": name.strip(),
-        "surname": surname.strip(),
-        "registered": True,
-        "is_inside": False,  # ВАЖНО: регистрация НЕ = вход. Входить нужно отдельно через reader 1.
-        "created_at": datetime.now().isoformat(),
-    }
+    c.execute("SELECT name, surname, is_inside FROM users WHERE uid = ?", (uid,))
+    user = c.fetchone()
 
-    push_event("registration_confirm", uid)
-    state["pending_uid"] = None  # карта больше не "висит" в ожидании
+    if not user:
+        c.execute("INSERT INTO users (uid, name, surname, is_inside) VALUES (?, 'User', 'User', 0)", (uid,))
+        c.execute("INSERT INTO events (action, uid, timestamp) VALUES ('register', ?, ?)", (uid, now))
+        conn.commit()
+        c.execute("SELECT name, surname, is_inside FROM users WHERE uid = ?", (uid,))
+        user = c.fetchone()
 
-    save_state()
-    return jsonify({"status": "ok", "uid": uid})
+    name, surname, is_inside = user
 
+    if action == "ENTRY" or reader == "1":
+        if is_inside:
+            event = "blocked_enter"
+        else:
+            event = "enter"
+            c.execute("UPDATE users SET is_inside = 1 WHERE uid = ?", (uid,))
+    elif action == "EXIT" or reader == "2":
+        if not is_inside:
+            event = "blocked_exit"
+        else:
+            event = "exit"
+            c.execute("UPDATE users SET is_inside = 0 WHERE uid = ?", (uid,))
+    else:
+        conn.close()
+        return jsonify({"error": "Invalid action"}), 400
 
-# ==================================================================
-#                    ЭНДПОИНТ ДЛЯ ESP32 (/rfid)
-# ==================================================================
-# reader=1 -> физический считыватель ВХОДА  (rfid2 в прошивке)
-# reader=2 -> физический считыватель ВЫХОДА / РЕГИСТРАЦИИ (rfid3 в прошивке,
-#             в публичном HTML он называется "считыватель №3")
-@app.get("/rfid")
-def rfid():
-    reader = request.args.get("reader", "")
-    uid = request.args.get("uid", "").upper()
+    c.execute("INSERT INTO events (action, uid, timestamp) VALUES (?, ?, ?)", (event, uid, now))
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "ok", "event": event, "name": name, "surname": surname})
 
-    if not uid:
-        return "ERROR: no uid", 400
+@app.route('/api/get-users', methods=['GET'])
+def get_users():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT action, uid, timestamp FROM events ORDER BY id DESC LIMIT 50")
+    events = c.fetchall()
+    c.execute("SELECT uid, name, surname, is_inside FROM users")
+    users = [{"uid": row[0], "name": row[1], "surname": row[2], "is_inside": row[3]} for row in c.fetchall()]
+    conn.close()
+    return jsonify({"events": events, "users": users})
 
-    # ---------- Считыватель №2 (физически "№3") ----------
-    if reader == "2":
-        # --- Регистрация ОТКРЫТА: это скан для регистрации, а не выход ---
-        if state["registration_open"]:
-            state["pending_uid"] = uid
-            push_event("registration_scan", uid)
-            save_state()
-            print(f"📇 Скан для регистрации: {uid}")
-            return "OK: registration pending, fill the form"
+@app.route('/api/public-data', methods=['GET'])
+def public_data():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM users WHERE is_inside = 1")
+    inside_count = c.fetchone()[0]
+    c.execute("SELECT timestamp FROM events ORDER BY id DESC LIMIT 1")
+    row = c.fetchone()
+    last_time = row[0] if row else ""
+    conn.close()
+    return jsonify({
+        "inside_count": inside_count,
+        "last_time": last_time,
+        "registration_open": registration_open
+    })
 
-        # --- Регистрация ЗАКРЫТА: обычный ВЫХОД ---
-        user = state["users"].get(uid)
-        if not user:
-            return "ERROR: card not registered", 404
-
-        # ИСПРАВЛЕНО: безусловный выход, без "залипающего" toggle
-        user["is_inside"] = False
-        push_event("exit", uid)
-        save_state()
-        print(f"⬅️ EXIT: {uid} ({user['name']} {user['surname']})")
-        return "OK: exit"
-
-    # ---------- Считыватель №1 (физически "№2") — ВХОД ----------
-    if reader == "1":
-        user = state["users"].get(uid)
-        if not user:
-            return "ERROR: card not registered", 404
-
-        user["is_inside"] = True
-        push_event("entry", uid)
-        save_state()
-        print(f"➡️ ENTRY: {uid} ({user['name']} {user['surname']})")
-        return "OK: entry"
-
-    return "ERROR: unknown reader", 400
-
-
-# ==================================================================
-#                    СТАТИКА (index.html, admin.html, ...)
-# ==================================================================
-@app.get("/")
-def serve_index():
-    return send_from_directory(PUBLIC_DIR, "index.html")
-
-
-@app.get("/<path:filename>")
-def serve_static(filename):
-    return send_from_directory(PUBLIC_DIR, filename)
-
-
-# ==================================================================
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 3000))
-    app.run(host="0.0.0.0", port=port)
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
