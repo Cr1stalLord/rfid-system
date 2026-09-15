@@ -231,6 +231,11 @@ def serve_index():
     return send_from_directory(PUBLIC_DIR, "index.html")
 
 
+@app.get("/admin")
+def serve_admin():
+    return send_from_directory(PUBLIC_DIR, "admin.html")
+
+
 @app.get("/<path:filename>")
 def serve_static(filename):
     return send_from_directory(PUBLIC_DIR, filename)
