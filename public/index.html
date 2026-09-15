@@ -96,7 +96,7 @@
     </form>
     <div class="hint" style="margin-top:10px;">
       Чтобы зарегистрировать новую карту: администратор открывает регистрацию,
-      вы прикладываете карту к считывателю №3, затем заполняете форму выше.
+      вы прикладываете карту к любому считывателю (входа или выхода), затем заполняете форму выше.
     </div>
     <div class="msg" id="formMsg"></div>
   </div>
@@ -143,7 +143,7 @@ async function refreshPublic() {
       submitBtn.disabled = false;
     } else if (reg.registration_open && !reg.pending_uid) {
       pendingBox.style.display = 'block';
-      pendingBox.textContent = 'Регистрация открыта. Приложите карту к считывателю №3.';
+      pendingBox.textContent = 'Регистрация открыта. Приложите карту к любому считывателю.';
       submitBtn.disabled = true;
     } else {
       pendingBox.style.display = 'none';
