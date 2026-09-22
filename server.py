@@ -67,8 +67,8 @@ def now_str():
     return datetime.now().strftime("%d.%m.%y, %H:%M:%S")
 
 
-def push_event(action, uid):
-    state["events"].insert(0, {"timestamp": now_str(), "action": action, "uid": uid})
+def push_event(action, uid, reader=None):
+    state["events"].insert(0, {"timestamp": now_str(), "action": action, "uid": uid, "reader": reader})
     if len(state["events"]) > 500:
         del state["events"][500:]
 
@@ -114,6 +114,7 @@ def public_data():
         "last_event_time": last["timestamp"] if last else None,
         "last_event_action": last["action"] if last else None,
         "last_event_uid": last["uid"] if last else None,
+        "last_event_reader": last.get("reader") if last else None,
     })
 
 
@@ -159,7 +160,7 @@ def confirm_registration():
             "is_inside": False,  # регистрация НЕ = вход
             "created_at": datetime.now().isoformat(),
         }
-        push_event("registration_confirm", uid)
+        push_event("registration_confirm", uid, None)
         state["pending_uid"] = None
         save_state()
     return jsonify({"status": "ok", "uid": uid})
@@ -203,7 +204,7 @@ def rfid():
                 return "OK: registration pending, fill the form"
             _last_scan[key] = now
             state["pending_uid"] = uid
-            push_event("registration_scan", uid)
+            push_event("registration_scan", uid, reader)
             save_state()
             print(f"REG-SCAN (reader={reader}): {uid}")
             return "OK: registration pending, fill the form"
@@ -212,33 +213,35 @@ def rfid():
         if is_duplicate_scan(reader, uid):
             return "OK: duplicate ignored"
 
-        # Считыватель №1 — ВХОД: только если снаружи
+        # Считыватель №1 — ВХОД: только если снаружи.
+        # СТРОГО: reader=1 никогда не делает выход.
         if reader == "1":
             user = state["users"].get(uid)
             if not user:
                 return "ERROR: card not registered", 404
             if user.get("is_inside"):
-                push_event("entry_denied", uid)
+                push_event("entry_denied", uid, reader)
                 save_state()
                 print(f"ENTRY DENIED (already inside): {uid}")
                 return "DENY_ALREADY_INSIDE", 409
             user["is_inside"] = True
-            push_event("entry", uid)
+            push_event("entry", uid, reader)
             save_state()
             print(f"ENTRY: {uid} ({user['name']} {user['surname']})")
             return "OK: entry"
 
-        # Считыватель №2 — ВЫХОД: только если внутри
+        # Считыватель №2 — ВЫХОД: только если внутри.
+        # СТРОГО: reader=2 никогда не делает вход.
         user = state["users"].get(uid)
         if not user:
             return "ERROR: card not registered", 404
         if not user.get("is_inside"):
-            push_event("exit_denied", uid)
+            push_event("exit_denied", uid, reader)
             save_state()
             print(f"EXIT DENIED (not inside): {uid}")
             return "DENY_NOT_INSIDE", 409
         user["is_inside"] = False
-        push_event("exit", uid)
+        push_event("exit", uid, reader)
         save_state()
         print(f"EXIT: {uid} ({user['name']} {user['surname']})")
         return "OK: exit"
