@@ -140,7 +140,7 @@
       <h2>Лента событий <span class="badge open" id="regBadgeAdmin">—</span></h2>
       <div class="scroll">
         <table>
-          <thead><tr><th>Время</th><th>Действие</th><th>UID</th></tr></thead>
+          <thead><tr><th>Время</th><th>Действие</th><th>Ридер</th><th>UID</th></tr></thead>
           <tbody id="eventsBody"></tbody>
         </table>
         <div class="empty" id="eventsEmpty" style="display:none;">Событий пока нет</div>
@@ -234,8 +234,10 @@ async function refreshAdmin() {
     document.getElementById('eventsEmpty').style.display = data.events.length ? 'none' : 'block';
     data.events.forEach(ev => {
       const tr = document.createElement('tr');
+      const readerLabel = ev.reader === '1' ? 'Вход №1' : ev.reader === '2' ? 'Выход №2' : '—';
       tr.innerHTML = `<td>${escapeHtml(ev.timestamp)}</td>
         <td><span class="tag ${escapeHtml(ev.action)}">${escapeHtml(actionsRu[ev.action] || ev.action)}</span></td>
+        <td style="color:var(--muted);font-size:12px;">${escapeHtml(readerLabel)}</td>
         <td class="uid">${escapeHtml(ev.uid)}</td>`;
       eventsBody.appendChild(tr);
     });
