@@ -29,6 +29,7 @@
     font-size:14px; font-weight:600; cursor:pointer;
   }
   .btn.danger{background:linear-gradient(180deg, #ff7a92, var(--red));}
+  .btn:disabled{opacity:.5; cursor:not-allowed;}
   .stats{display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:14px; margin-bottom:22px;}
   .stat-card{
     background:linear-gradient(180deg, var(--card2), var(--card));
@@ -57,6 +58,7 @@
   .tag{padding:3px 9px; border-radius:999px; font-size:11px; font-weight:600;}
   .tag.entry{background:rgba(61,220,151,.12); color:var(--green);}
   .tag.exit{background:rgba(255,92,122,.12); color:var(--red);}
+  .tag.entry_denied,.tag.exit_denied{background:rgba(255,92,122,.18); color:var(--red); border:1px dashed var(--red);}
   .tag.register, .tag.registration_scan{background:rgba(255,200,87,.12); color:var(--yellow);}
   .tag.registration_confirm{background:rgba(91,140,255,.14); color:var(--accent);}
   .scroll{max-height:420px; overflow-y:auto;}
@@ -64,14 +66,52 @@
   .dot.in{background:var(--green);}
   .dot.out{background:var(--muted);}
   .empty{color:var(--muted); font-size:13px; padding:14px 0; text-align:center;}
+
+  /* ===== Модалка двойного подтверждения (строго по центру) ===== */
+  .modal-overlay{
+    position:fixed; inset:0; z-index:1000;
+    background:rgba(5,7,12,.72);
+    backdrop-filter: blur(3px);
+    display:none; align-items:center; justify-content:center;
+    padding:20px;
+  }
+  .modal-overlay.show{display:flex;}
+  .modal{
+    width:100%; max-width:420px;
+    background:linear-gradient(180deg, var(--card2), var(--card));
+    border:1px solid var(--border); border-radius:18px;
+    padding:26px 24px; text-align:center;
+    box-shadow:0 24px 70px rgba(0,0,0,.6);
+    animation:pop .18s ease-out;
+  }
+  @keyframes pop{from{transform:scale(.96); opacity:0;} to{transform:scale(1); opacity:1;}}
+  .modal-icon{font-size:40px; margin-bottom:10px;}
+  .modal h3{margin:0 0 10px; font-size:18px;}
+  .modal p{margin:0 0 8px; font-size:13.5px; color:var(--muted); line-height:1.55;}
+  .modal p b{color:var(--red);}
+  .modal-steps{font-size:12px; color:var(--muted); margin-bottom:16px;}
+  .modal-steps b{color:var(--text);}
+  .modal-btns{display:flex; gap:10px; margin-top:18px;}
+  .modal-btns .btn{flex:1; padding:12px 10px;}
+  .btn.ghost{background:#222839; border:1px solid var(--border);}
+  .toast{
+    position:fixed; bottom:24px; left:50%; transform:translateX(-50%);
+    background:#1e2230; border:1px solid var(--border); color:var(--text);
+    padding:11px 18px; border-radius:12px; font-size:13px; z-index:1100;
+    display:none; box-shadow:0 10px 30px rgba(0,0,0,.5);
+  }
+  .toast.show{display:block;}
+  .toast.ok{border-color:rgba(61,220,151,.5);}
+  .toast.err{border-color:rgba(255,92,122,.5);}
 </style>
 </head>
 <body>
 <div class="wrap">
   <div class="top">
     <h1>Админ-панель <span>контроля доступа</span></h1>
-    <div style="display:flex; align-items:center; gap:16px;">
+    <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
       <a class="pubLink" href="/" target="_blank">Публичная страница →</a>
+      <button class="btn danger" id="resetBtn">Сбросить всё</button>
       <button class="btn" id="toggleBtn">Загрузка...</button>
     </div>
   </div>
@@ -120,12 +160,51 @@
   </div>
 </div>
 
+<!-- Двойное подтверждение: шаг 1 -> шаг 2, всё строго по центру экрана -->
+<div class="modal-overlay" id="resetOverlay" role="dialog" aria-modal="true">
+  <div class="modal" id="resetModal">
+    <!-- Шаг 1 -->
+    <div id="resetStep1">
+      <div class="modal-icon">⚠️</div>
+      <h3>Очистить всё?</h3>
+      <p>Будут <b>безвозвратно удалены</b>: все пользователи,<br>вся лента событий, ожидающая карта.</p>
+      <p>Регистрация будет закрыта.</p>
+      <div class="modal-steps">Шаг <b>1</b> из 2</div>
+      <div class="modal-btns">
+        <button class="btn ghost" id="resetCancel1">Отмена</button>
+        <button class="btn danger" id="resetConfirm1">Подтверждаю</button>
+      </div>
+    </div>
+    <!-- Шаг 2 -->
+    <div id="resetStep2" style="display:none;">
+      <div class="modal-icon">🗑️</div>
+      <h3>Точно удалить всё?</h3>
+      <p>Это <b>второе и последнее</b> подтверждение.<br>Восстановить данные будет невозможно.</p>
+      <div class="modal-steps">Шаг <b>2</b> из 2</div>
+      <div class="modal-btns">
+        <button class="btn ghost" id="resetCancel2">Отмена</button>
+        <button class="btn danger" id="resetConfirm2">Да, удалить всё</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
 <script>
 const actionsRu = {
   entry: 'Вход', exit: 'Выход', register: 'Авторегистрация',
   registration_scan: 'Скан для регистрации',
-  registration_confirm: 'Регистрация подтверждена'
+  registration_confirm: 'Регистрация подтверждена',
+  entry_denied: 'Вход отклонён (уже внутри)',
+  exit_denied: 'Выход отклонён (не внутри)'
 };
+
+function escapeHtml(s){
+  return String(s == null ? '' : s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
 
 async function refreshAdmin() {
   try {
@@ -155,9 +234,9 @@ async function refreshAdmin() {
     document.getElementById('eventsEmpty').style.display = data.events.length ? 'none' : 'block';
     data.events.forEach(ev => {
       const tr = document.createElement('tr');
-      tr.innerHTML = `<td>${ev.timestamp}</td>
-        <td><span class="tag ${ev.action}">${actionsRu[ev.action] || ev.action}</span></td>
-        <td class="uid">${ev.uid}</td>`;
+      tr.innerHTML = `<td>${escapeHtml(ev.timestamp)}</td>
+        <td><span class="tag ${escapeHtml(ev.action)}">${escapeHtml(actionsRu[ev.action] || ev.action)}</span></td>
+        <td class="uid">${escapeHtml(ev.uid)}</td>`;
       eventsBody.appendChild(tr);
     });
 
@@ -166,8 +245,8 @@ async function refreshAdmin() {
     document.getElementById('usersEmpty').style.display = data.users.length ? 'none' : 'block';
     data.users.forEach(u => {
       const tr = document.createElement('tr');
-      const fio = (u.name + ' ' + u.surname).trim() || '—';
-      tr.innerHTML = `<td class="uid">${u.uid}</td>
+      const fio = escapeHtml(((u.name || '') + ' ' + (u.surname || '')).trim() || '—');
+      tr.innerHTML = `<td class="uid">${escapeHtml(u.uid)}</td>
         <td>${fio}</td>
         <td><span class="dot ${u.is_inside ? 'in' : 'out'}"></span>${u.is_inside ? 'Внутри' : 'Снаружи'}</td>`;
       usersBody.appendChild(tr);
@@ -178,6 +257,69 @@ async function refreshAdmin() {
 document.getElementById('toggleBtn').addEventListener('click', async () => {
   await fetch('/toggle-registration', { method: 'POST' });
   refreshAdmin();
+});
+
+// ===== Двойное подтверждение сброса =====
+const overlay = document.getElementById('resetOverlay');
+const step1 = document.getElementById('resetStep1');
+const step2 = document.getElementById('resetStep2');
+const toast = document.getElementById('toast');
+let toastTimer = null;
+
+function showToast(text, kind) {
+  toast.textContent = text;
+  toast.className = 'toast show ' + (kind || '');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { toast.className = 'toast'; }, 3500);
+}
+
+function openResetModal() {
+  step1.style.display = 'block';
+  step2.style.display = 'none';
+  overlay.classList.add('show');
+  document.body.style.overflow = 'hidden';
+  document.getElementById('resetConfirm1').focus();
+}
+function closeResetModal() {
+  overlay.classList.remove('show');
+  document.body.style.overflow = '';
+}
+
+document.getElementById('resetBtn').addEventListener('click', openResetModal);
+document.getElementById('resetCancel1').addEventListener('click', closeResetModal);
+document.getElementById('resetCancel2').addEventListener('click', closeResetModal);
+
+// Шаг 1 -> Шаг 2 по кнопке "Подтверждаю"
+document.getElementById('resetConfirm1').addEventListener('click', () => {
+  step1.style.display = 'none';
+  step2.style.display = 'block';
+  document.getElementById('resetConfirm2').focus();
+});
+
+// Шаг 2 -> реальное удаление
+document.getElementById('resetConfirm2').addEventListener('click', async () => {
+  const btn = document.getElementById('resetConfirm2');
+  btn.disabled = true;
+  btn.textContent = 'Удаление...';
+  try {
+    const res = await fetch('/reset-all', { method: 'POST' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    closeResetModal();
+    showToast('Всё очищено: пользователи и события удалены', 'ok');
+  } catch (e) {
+    showToast('Ошибка очистки: ' + e.message, 'err');
+  }
+  btn.disabled = false;
+  btn.textContent = 'Да, удалить всё';
+  refreshAdmin();
+});
+
+// ESC закрывает, клик по фону — только на шаге 1 (чтобы случайно не закрыть шаг 2)
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && overlay.classList.contains('show')) closeResetModal();
+});
+overlay.addEventListener('click', (e) => {
+  if (e.target === overlay && step1.style.display !== 'none') closeResetModal();
 });
 
 refreshAdmin();
