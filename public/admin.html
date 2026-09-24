@@ -154,6 +154,25 @@
   .toast.show{opacity:1; transform:translateX(-50%) translateY(0);}
   .toast.ok{border-color:rgba(52,211,153,.5);}
   .toast.err{border-color:rgba(251,113,133,.5);}
+  .reg-panel{margin-bottom:16px;}
+  .reg-grid{display:grid; grid-template-columns:1fr 1fr; gap:11px; margin-top:14px;}
+  @media (max-width:640px){ .reg-grid{grid-template-columns:1fr;} }
+  .field label{display:block; font-size:12px; font-weight:600; color:var(--muted); margin-bottom:6px;}
+  .field input{
+    width:100%; background:rgba(0,0,0,.35); border:1px solid rgba(255,255,255,.1);
+    border-radius:12px; padding:12px 14px; color:var(--text);
+    font-size:14px; font-family:inherit; outline:none; transition:all .2s;
+  }
+  .field input:focus{border-color:var(--accent); box-shadow:0 0 0 3px rgba(91,140,255,.18);}
+  .reg-pending{
+    margin-top:14px; border-radius:12px; padding:12px 14px; font-size:13px; line-height:1.55;
+    background:rgba(251,191,36,.09); border:1px solid rgba(251,191,36,.35); color:var(--yellow);
+  }
+  .reg-msg{margin-top:12px; font-size:13px; border-radius:12px; padding:11px 14px; display:none;}
+  .reg-msg.ok{display:block; background:rgba(52,211,153,.12); color:var(--green);
+    border:1px solid rgba(52,211,153,.35);}
+  .reg-msg.err{display:block; background:rgba(251,113,133,.12); color:var(--red);
+    border:1px solid rgba(251,113,133,.35);}
 </style>
 </head>
 <body>
@@ -194,6 +213,27 @@
       <div class="stat-label">Выходов</div>
       <div class="stat-value red" id="sExits">—</div>
     </div>
+  </div>
+
+  <div class="panel reg-panel">
+    <h2>📝 Регистрация карт <span class="badge closed" id="regBadgeForm">—</span></h2>
+    <div style="font-size:12.5px;color:var(--muted);line-height:1.6;">
+      💡 Откройте регистрацию кнопкой выше, приложите карту к <b>отдельному ридеру №3</b> (второй ESP),
+      затем введите имя и фамилию и нажмите кнопку.
+    </div>
+    <div class="reg-pending" id="regPendingBox" style="display:none;"></div>
+    <div class="reg-grid">
+      <div class="field">
+        <label for="regName">Имя</label>
+        <input type="text" id="regName" placeholder="Например, Иван" autocomplete="off">
+      </div>
+      <div class="field">
+        <label for="regSurname">Фамилия</label>
+        <input type="text" id="regSurname" placeholder="Например, Петров" autocomplete="off">
+      </div>
+    </div>
+    <button class="btn" id="regConfirmBtn" style="width:100%;margin-top:12px;">✨ Зарегистрировать</button>
+    <div class="reg-msg" id="regMsg"></div>
   </div>
 
   <div class="columns">
@@ -283,6 +323,29 @@ async function refreshAdmin() {
       ? ('🟢 Открыта' + (reg.pending_uid ? (' · ждём: ' + reg.pending_uid) : ''))
       : '🔴 Закрыта';
 
+    const badgeForm = document.getElementById('regBadgeForm');
+    if (badgeForm) {
+      badgeForm.className = 'badge ' + (reg.registration_open ? 'open' : 'closed');
+      badgeForm.textContent = reg.registration_open ? '🟢 Открыта' : '🔴 Закрыта';
+    }
+
+    const pendingBox = document.getElementById('regPendingBox');
+    const confirmBtn = document.getElementById('regConfirmBtn');
+    if (pendingBox && confirmBtn) {
+      if (reg.registration_open && reg.pending_uid) {
+        pendingBox.style.display = 'block';
+        pendingBox.innerHTML = '📡 Карта на ридере №3 (UID: <b>' + escapeHtml(reg.pending_uid) + '</b>). Введите имя и нажмите кнопку.';
+        confirmBtn.disabled = false;
+      } else if (reg.registration_open && !reg.pending_uid) {
+        pendingBox.style.display = 'block';
+        pendingBox.textContent = '⏳ Регистрация открыта. Приложите карту к отдельному ридеру №3 (второй ESP).';
+        confirmBtn.disabled = true;
+      } else {
+        pendingBox.style.display = 'none';
+        confirmBtn.disabled = true;
+      }
+    }
+
     const toggleBtn = document.getElementById('toggleBtn');
     toggleBtn.textContent = reg.registration_open ? '🔒 Закрыть регистрацию' : '🔓 Открыть регистрацию';
     toggleBtn.className = 'btn' + (reg.registration_open ? ' danger' : '');
@@ -292,7 +355,7 @@ async function refreshAdmin() {
     document.getElementById('eventsEmpty').style.display = data.events.length ? 'none' : 'block';
     data.events.forEach(ev => {
       const tr = document.createElement('tr');
-      const readerLabel = ev.reader === '1' ? '🟢 Вход №1' : ev.reader === '2' ? '🔴 Выход №2' : '—';
+      const readerLabel = ev.reader === '1' ? '🟢 Вход №1' : ev.reader === '2' ? '🔴 Выход №2' : ev.reader === '3' ? '📇 Рег. №3' : '—';
       tr.innerHTML = `<td style="white-space:nowrap;">${escapeHtml(ev.timestamp)}</td>
         <td><span class="tag ${escapeHtml(ev.action)}">${escapeHtml(actionsRu[ev.action] || ev.action)}</span></td>
         <td class="reader">${escapeHtml(readerLabel)}</td>
@@ -316,6 +379,34 @@ async function refreshAdmin() {
 
 document.getElementById('toggleBtn').addEventListener('click', async () => {
   await fetch('/toggle-registration', { method: 'POST' });
+  refreshAdmin();
+});
+
+document.getElementById('regConfirmBtn').addEventListener('click', async () => {
+  const name = document.getElementById('regName').value.trim();
+  const surname = document.getElementById('regSurname').value.trim();
+  const msgBox = document.getElementById('regMsg');
+  msgBox.className = 'reg-msg';
+  try {
+    const res = await fetch('/confirm-registration', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, surname })
+    });
+    const data = await res.json();
+    if (data.status === 'ok') {
+      msgBox.className = 'reg-msg ok';
+      msgBox.textContent = '🎉 Готово! Карта ' + data.uid + ' зарегистрирована.';
+      document.getElementById('regName').value = '';
+      document.getElementById('regSurname').value = '';
+    } else {
+      msgBox.className = 'reg-msg err';
+      msgBox.textContent = data.message || 'Ошибка регистрации';
+    }
+  } catch (err) {
+    msgBox.className = 'reg-msg err';
+    msgBox.textContent = 'Ошибка сети';
+  }
   refreshAdmin();
 });
 
