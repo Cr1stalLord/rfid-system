@@ -183,7 +183,9 @@ def reset_all():
 # ==================================================================
 #                    ЭНДПОИНТ ДЛЯ ESP32 (/rfid)
 # ==================================================================
-# reader=1 -> ВХОД, reader=2 -> ВЫХОД (или скан регистрации если открыта)
+# reader=1 -> ВХОД (главный ESP, RFID входа) — только вход, всегда
+# reader=2 -> ВЫХОД (главный ESP, RFID выхода) — только выход, всегда
+# reader=3 -> РЕГИСТРАЦИЯ (второй ESP на втором ПК, один RFID) — только скан
 @app.get("/rfid")
 def rfid():
     reader = request.args.get("reader", "")
@@ -191,13 +193,14 @@ def rfid():
 
     if not uid:
         return "ERROR: no uid", 400
-    if reader not in ("1", "2"):
+    if reader not in ("1", "2", "3"):
         return "ERROR: unknown reader", 400
 
     with db_lock:
-        # ---------- Регистрация ОТКРЫТА: любой считыватель = скан ----------
-        if state["registration_open"]:
-            # антиспам: не плодим registration_scan пока карту держат
+        # ---------- Считыватель №3 — ТОЛЬКО регистрация ----------
+        if reader == "3":
+            if not state["registration_open"]:
+                return "DENY_REG_CLOSED", 409
             key = ("reg", uid)
             now = time.monotonic()
             if state["pending_uid"] == uid and (now - _last_scan.get(key, 0) < SCAN_COOLDOWN_SEC):
@@ -206,10 +209,12 @@ def rfid():
             state["pending_uid"] = uid
             push_event("registration_scan", uid, reader)
             save_state()
-            print(f"REG-SCAN (reader={reader}): {uid}")
+            print(f"REG-SCAN (reader=3): {uid}")
             return "OK: registration pending, fill the form"
 
-        # ---------- Регистрация ЗАКРЫТА ----------
+        # ---------- Считыватели №1/№2 — ТОЛЬКО вход/выход ----------
+        # Регистрация на них отключена: двери работают даже пока открыта
+        # регистрация на втором ESP.
         if is_duplicate_scan(reader, uid):
             return "OK: duplicate ignored"
 
