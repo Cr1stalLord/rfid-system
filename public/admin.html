@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Админ-панель — Контроль доступа</title>
+<title>Панель контроля доступа</title>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
   :root{
@@ -56,7 +56,7 @@
     box-shadow:0 8px 22px rgba(251,113,133,.3);}
   .btn.ghost{background:rgba(255,255,255,.06); border:1px solid var(--glass-brd);
     box-shadow:none;}
-  .stats{display:grid; grid-template-columns:repeat(4,1fr); gap:14px; margin-bottom:20px;}
+  .stats{display:grid; grid-template-columns:repeat(3,1fr); gap:14px; margin-bottom:20px;}
   @media (max-width:860px){ .stats{grid-template-columns:repeat(2,1fr);} }
   .stat-card{
     background:var(--glass); border:1px solid var(--glass-brd);
@@ -181,23 +181,17 @@
     <div class="brand">
       <div class="logo">🛡️</div>
       <div>
-        <h1>Админ-панель <span>контроля доступа</span></h1>
+        <h1>Панель <span>контроля доступа</span></h1>
         <div class="sub">Мониторинг входов · пользователи · регистрация</div>
       </div>
     </div>
     <div class="actions">
-      <a class="pubLink" href="/" target="_blank">🌐 Публичная страница</a>
       <button class="btn danger" id="resetBtn">🗑️ Сбросить всё</button>
       <button class="btn" id="toggleBtn">Загрузка...</button>
     </div>
   </div>
 
   <div class="stats">
-    <div class="stat-card">
-      <div class="stat-ico">📊</div>
-      <div class="stat-label">Всего событий</div>
-      <div class="stat-value" id="sTotalEvents">—</div>
-    </div>
     <div class="stat-card">
       <div class="stat-ico">👥</div>
       <div class="stat-label">Людей внутри</div>
@@ -312,7 +306,8 @@ async function refreshAdmin() {
     const data = await dataRes.json();
     const reg = await regRes.json();
 
-    document.getElementById('sTotalEvents').textContent = data.stats.total_events;
+    const sTotal = document.getElementById('sTotalEvents');
+    if (sTotal) sTotal.textContent = data.stats.total_events;
     document.getElementById('sInside').textContent = data.stats.inside_count;
     document.getElementById('sEntries').textContent = data.stats.entries;
     document.getElementById('sExits').textContent = data.stats.exits;
