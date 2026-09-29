@@ -226,13 +226,13 @@
         <input type="text" id="regSurname" placeholder="Например, Петров" autocomplete="off">
       </div>
     </div>
-    <button class="btn" id="regConfirmBtn" style="width:100%;margin-top:12px;">✨ Зарегистрировать</button>
+    <button class="btn" id="regConfirmBtn" style="width:100%;margin-top:12px;" disabled>✨ Зарегистрировать</button>
     <div class="reg-msg" id="regMsg"></div>
   </div>
 
   <div class="columns">
     <div class="panel">
-      <h2>📜 Лента событий <span class="badge open" id="regBadgeAdmin">—</span></h2>
+      <h2>📜 Лента событий <span class="badge closed" id="regBadgeAdmin">—</span></h2>
       <div class="scroll">
         <table>
           <thead><tr><th>Время</th><th>Действие</th><th>Ридер</th><th>UID</th></tr></thead>
@@ -377,8 +377,7 @@ document.getElementById('toggleBtn').addEventListener('click', async () => {
   refreshAdmin();
 });
 
-document.getElementById('regConfirmBtn').addEventListener('click', async () => {
-  const name = document.getElementById('regName').value.trim();
+document.getElementById('regConfirmBtn').addEventListener('click', async () => {  const name = document.getElementById('regName').value.trim();
   const surname = document.getElementById('regSurname').value.trim();
   const msgBox = document.getElementById('regMsg');
   msgBox.className = 'reg-msg';
@@ -403,6 +402,16 @@ document.getElementById('regConfirmBtn').addEventListener('click', async () => {
     msgBox.textContent = 'Ошибка сети';
   }
   refreshAdmin();
+});
+
+// Enter в полях имени/фамилии = кнопка "Зарегистрировать"
+['regName', 'regSurname'].forEach(id => {
+  document.getElementById(id).addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      document.getElementById('regConfirmBtn').click();
+    }
+  });
 });
 
 const overlay = document.getElementById('resetOverlay');
