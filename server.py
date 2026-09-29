@@ -1,15 +1,27 @@
 # ==================================================================
 # RFID Access Control — сервер (Python / Flask)
+#
 # Архитектура: 2 ESP.
-#   Главный ESP (2 ридера): reader=1 ВХОД, reader=2 ВЫХОД.
-#     Вход только если снаружи (иначе 409 DENY_ALREADY_INSIDE),
-#     выход только если внутри (иначе 409 DENY_NOT_INSIDE).
-#   Второй ESP (1 ридер): reader=3 ТОЛЬКО скан регистрации.
-#     Принимается только при открытой регистрации
-#     (иначе 409 DENY_REG_CLOSED), вход/выход не делает.
-# Антиспам: повторный скан той же карты игнорируется 3 сек.
-# POST /reset-all — полная очистка (админка, двойное подтверждение).
-# Деплой: gunicorn server:app --workers 1 (состояние в памяти!).
+#   Главный ESP, классический ESP32 (2 ридера):
+#     reader=1 ВХОД — только вход, всегда
+#     reader=2 ВЫХОД — только выход, всегда
+#   Второй ESP, ESP32-S3 (1 ридер):
+#     reader=3 РЕГИСТРАЦИЯ — только скан для регистрации
+#
+# Правила:
+#   Вход — только если карта снаружи (иначе 409 DENY_ALREADY_INSIDE).
+#   Выход — только если карта внутри (иначе 409 DENY_NOT_INSIDE).
+#   Скан регистрации — только при открытой регистрации
+#     (иначе 409 DENY_REG_CLOSED). Вход/выход этот ридер не делает.
+#   Повторный скан той же карты режется кулдауном 3 сек (антиспам,
+#     пока карту держат на ридере).
+#
+# Админка: /admin (вся работа здесь: мониторинг, регистрация,
+#   открытие/закрытие регистрации, полный сброс с двойным
+#   подтверждением). Корень / редиректит на /admin.
+#
+# Деплой (Render): Procfile -> gunicorn server:app --workers 1
+#   (--workers 1 обязателен: состояние в памяти процесса).
 # ==================================================================
 
 import json
@@ -27,27 +39,26 @@ DB_FILE = os.path.join(BASE_DIR, "db.json")
 app = Flask(__name__, static_folder=None)
 db_lock = threading.Lock()
 
-# Антиспам: (reader, uid) -> timestamp последнего принятого скана
+SCAN_COOLDOWN_SEC = 3.0
+MAX_EVENTS = 500
+
+# (reader, uid) -> время последнего принятого скана (защита от спама)
 _last_scan = {}
 
-SCAN_COOLDOWN_SEC = 3.0
-
-# ---------------------- Состояние в памяти ----------------------
 state = {
     "registration_open": False,
     "pending_uid": None,
-    "users": {},   # uid -> { uid, name, surname, registered, is_inside, created_at }
-    "events": []   # [{ timestamp, action, uid }], новые — в начале списка
+    "users": {},   # uid -> {uid, name, surname, registered, is_inside, created_at}
+    "events": [],  # [{timestamp, action, uid, reader}], новые в начале
 }
 
 
-# ---------------------- Персистентность (best-effort) ----------------------
+# ------------------------- persistence -------------------------
 def load_state():
     try:
         if os.path.exists(DB_FILE):
             with open(DB_FILE, "r", encoding="utf-8") as f:
                 parsed = json.load(f)
-            # аккуратно мержим, чтобы не потерять ключи при старом db.json
             for k in ("registration_open", "pending_uid", "users", "events"):
                 if k in parsed:
                     state[k] = parsed[k]
@@ -67,29 +78,30 @@ def save_state():
 load_state()
 
 
-# ---------------------- Вспомогательные функции ----------------------
+# ------------------------- helpers -------------------------
 def now_str():
     return datetime.now().strftime("%d.%m.%y, %H:%M:%S")
 
 
 def push_event(action, uid, reader=None):
-    state["events"].insert(0, {"timestamp": now_str(), "action": action, "uid": uid, "reader": reader})
-    if len(state["events"]) > 500:
-        del state["events"][500:]
+    state["events"].insert(0, {
+        "timestamp": now_str(), "action": action, "uid": uid, "reader": reader,
+    })
+    if len(state["events"]) > MAX_EVENTS:
+        del state["events"][MAX_EVENTS:]
 
 
 def get_stats():
-    users_arr = list(state["users"].values())
+    users = list(state["users"].values())
     return {
         "total_events": len(state["events"]),
-        "inside_count": sum(1 for u in users_arr if u.get("is_inside")),
+        "inside_count": sum(1 for u in users if u.get("is_inside")),
         "entries": sum(1 for e in state["events"] if e["action"] == "entry"),
         "exits": sum(1 for e in state["events"] if e["action"] == "exit"),
     }
 
 
 def is_duplicate_scan(reader, uid):
-    """ESP32 шлёт повтор пока карта лежит. Режем повторы по кулдауну."""
     key = (reader, uid)
     now = time.monotonic()
     last = _last_scan.get(key, 0)
@@ -99,10 +111,7 @@ def is_duplicate_scan(reader, uid):
     return False
 
 
-# ==================================================================
-#                          ПУБЛИЧНОЕ API
-# ==================================================================
-
+# ------------------------- API -------------------------
 @app.get("/api/registration-status")
 def registration_status():
     return jsonify({
@@ -152,7 +161,7 @@ def confirm_registration():
         if not state["registration_open"]:
             return jsonify({"status": "error", "message": "Регистрация закрыта"}), 400
         if not state["pending_uid"]:
-            return jsonify({"status": "error", "message": "Сначала приложите карту к считывателю"}), 400
+            return jsonify({"status": "error", "message": "Сначала приложите карту к ридеру №3"}), 400
         if not name or not surname:
             return jsonify({"status": "error", "message": "Заполните имя и фамилию"}), 400
 
@@ -173,7 +182,7 @@ def confirm_registration():
 
 @app.post("/reset-all")
 def reset_all():
-    """Полная очистка: пользователи, события, pending, регистрация закрывается."""
+    """Полная очистка: пользователи, события, pending-карта, регистрация закрыта."""
     with db_lock:
         state["users"] = {}
         state["events"] = []
@@ -185,12 +194,7 @@ def reset_all():
     return jsonify({"status": "ok", "message": "Всё очищено"})
 
 
-# ==================================================================
-#                    ЭНДПОИНТ ДЛЯ ESP32 (/rfid)
-# ==================================================================
-# reader=1 -> ВХОД (главный ESP, RFID входа) — только вход, всегда
-# reader=2 -> ВЫХОД (главный ESP, RFID выхода) — только выход, всегда
-# reader=3 -> РЕГИСТРАЦИЯ (второй ESP на втором ПК, один RFID) — только скан
+# ------------------------- ESP32 -------------------------
 @app.get("/rfid")
 def rfid():
     reader = request.args.get("reader", "")
@@ -202,7 +206,7 @@ def rfid():
         return "ERROR: unknown reader", 400
 
     with db_lock:
-        # ---------- Считыватель №3 — ТОЛЬКО регистрация ----------
+        # Ридер №3 (второй ESP) — ТОЛЬКО скан регистрации
         if reader == "3":
             if not state["registration_open"]:
                 return "DENY_REG_CLOSED", 409
@@ -217,14 +221,12 @@ def rfid():
             print(f"REG-SCAN (reader=3): {uid}")
             return "OK: registration pending, fill the form"
 
-        # ---------- Считыватели №1/№2 — ТОЛЬКО вход/выход ----------
-        # Регистрация на них отключена: двери работают даже пока открыта
-        # регистрация на втором ESP.
+        # Ридеры №1/№2 (главный ESP) — ТОЛЬКО вход/выход.
+        # Работают всегда, даже при открытой регистрации.
         if is_duplicate_scan(reader, uid):
             return "OK: duplicate ignored"
 
-        # Считыватель №1 — ВХОД: только если снаружи.
-        # СТРОГО: reader=1 никогда не делает выход.
+        # №1 — ВХОД, только если карта снаружи
         if reader == "1":
             user = state["users"].get(uid)
             if not user:
@@ -240,8 +242,7 @@ def rfid():
             print(f"ENTRY: {uid} ({user['name']} {user['surname']})")
             return "OK: entry"
 
-        # Считыватель №2 — ВЫХОД: только если внутри.
-        # СТРОГО: reader=2 никогда не делает вход.
+        # №2 — ВЫХОД, только если карта внутри
         user = state["users"].get(uid)
         if not user:
             return "ERROR: card not registered", 404
@@ -257,9 +258,7 @@ def rfid():
         return "OK: exit"
 
 
-# ==================================================================
-#                    СТАТИКА (index.html, admin.html, ...)
-# ==================================================================
+# ------------------------- static -------------------------
 @app.get("/")
 def serve_index():
     return send_from_directory(PUBLIC_DIR, "index.html")
@@ -275,7 +274,6 @@ def serve_static(filename):
     return send_from_directory(PUBLIC_DIR, filename)
 
 
-# ==================================================================
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 3000))
     app.run(host="0.0.0.0", port=port)
